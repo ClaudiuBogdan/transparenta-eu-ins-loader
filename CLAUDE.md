@@ -46,6 +46,15 @@ pnpm db:migrate       # Run migrations
 - `src/db/schema.ts` - Kysely schema (contexts, matrices, dimensions, statistics, SIRUTA)
 - `src/types/index.ts` - TypeScript types for INS API responses
 
+## Extracting Data
+
+See **[CLI_USAGE.md](./CLI_USAGE.md)** for detailed instructions on:
+
+- Finding and querying matrices (datasets)
+- Building `encQuery` strings with `nomItemId` values
+- Complete examples for population and education data
+- API reference and troubleshooting
+
 ## INS API Constraints
 
 - **Rate limit:** 750ms delay between requests (enforced in `rateLimitedFetch`)

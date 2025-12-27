@@ -1,0 +1,58 @@
+{
+  "language": "ro",
+  "arr": [
+    [
+      {
+        "label": "Total",
+        "nomItemId": 1,
+        "offset": 1,
+        "parentId": null
+      }
+    ],
+    [
+      {
+        "label": "Total ",
+        "nomItemId": 105,
+        "offset": 1,
+        "parentId": null
+      }
+    ],
+    [
+      {
+        "label": "Total ",
+        "nomItemId": 108,
+        "offset": 1,
+        "parentId": null
+      }
+    ],
+    [
+      {
+        "label": "TOTAL",
+        "nomItemId": 112,
+        "offset": 1,
+        "parentId": null
+      }
+    ],
+    [
+      {
+        "label": "Anul 2003",
+        "nomItemId": 4494,
+        "offset": 1,
+        "parentId": null
+      }
+    ],
+    [
+      {
+        "label": "Numar persoane",
+        "nomItemId": 9685,
+        "offset": 1,
+        "parentId": null
+      }
+    ]
+  ],
+  "matrixName": "POP105A",
+  "matrixDetails": {
+    "nomJud": 0,
+    "nomLoc": 0
+  }
+}

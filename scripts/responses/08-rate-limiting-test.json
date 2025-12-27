@@ -1,0 +1,6 @@
+{
+  "testCount": 5,
+  "responseTimes": [68, 77, 66, 75, 70],
+  "averageTime": 71.2,
+  "serverEnforced": false
+}

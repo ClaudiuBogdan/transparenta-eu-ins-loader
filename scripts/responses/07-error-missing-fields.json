@@ -1,0 +1,13 @@
+{
+  "endpoint": "/matrix/dataSet/POP105A",
+  "method": "POST",
+  "status": 500,
+  "statusText": "Internal Server Error",
+  "duration": 802,
+  "error": "{\"timestamp\":1766839357000,\"status\":500,\"error\":\"Internal Server Error\",\"exception\":\"java.lang.NullPointerException\",\"message\":\"No message available\",\"path\":\"/tempo-ins/matrix/dataSet/POP105A\"}",
+  "headers": {
+    "content-type": "application/json",
+    "date": "Sat, 27 Dec 2025 12:42:36 GMT",
+    "server": "Apache-Coyote/1.1"
+  }
+}

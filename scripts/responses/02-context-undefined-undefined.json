@@ -1,0 +1,13 @@
+{
+  "endpoint": "/context/undefined",
+  "method": "GET",
+  "status": 400,
+  "statusText": "Bad Request",
+  "duration": 753,
+  "error": "{\"timestamp\":1766839170937,\"status\":400,\"error\":\"Bad Request\",\"exception\":\"org.springframework.beans.TypeMismatchException\",\"message\":\"Failed to convert value of type [java.lang.String] to required type [short]; nested exception is java.lang.NumberFormatException: For input string: \\\"undefined\\\"\",\"path\":\"/tempo-ins/context/undefined\"}",
+  "headers": {
+    "content-type": "application/json;charset=UTF-8",
+    "date": "Sat, 27 Dec 2025 12:39:30 GMT",
+    "server": "Apache-Coyote/1.1"
+  }
+}

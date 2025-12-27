@@ -1,0 +1,110 @@
+{
+  "endpoint": "/context/1",
+  "method": "GET",
+  "status": 200,
+  "statusText": "OK",
+  "duration": 478,
+  "data": {
+    "context": {
+      "name": "A. STATISTICA SOCIALA",
+      "code": "1",
+      "childrenUrl": "context",
+      "comment": "",
+      "url": "context"
+    },
+    "ancestors": [
+      {
+        "name": "home",
+        "code": "",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      }
+    ],
+    "children": [
+      {
+        "name": "A.1 POPULATIE SI STRUCTURA DEMOGRAFICA <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=15&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Comunicate de presa</a>",
+        "code": "10",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.2 MISCAREA NATURALA A POPULATIEI <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=15&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Comunicate de presa</a>",
+        "code": "11",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.3 MISCAREA MIGRATORIE A POPULATIEI <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=15&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Comunicate de presa</a>",
+        "code": "12",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.4 FORTA DE MUNCA  <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=14&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Forta de munca si castiguri salariale-Comunicate de presa</a>\n;\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n      \n\n\n\n\n\n\n                       \n<a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=14a&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Ocuparea si somajul-Comunicate de presa</a>\n\n",
+        "code": "15",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.5 VENITURI SI CONDITII DE VIATA  <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=24&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\"> Comunicate de presa </a>",
+        "code": "20",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.6 PROTECTIE SOCIALA  <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=17&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Comunicate de presa</a>",
+        "code": "21",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.7 EDUCATIE <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=8&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Comunicate de presa</a>",
+        "code": "25",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.8 EDUCATIA ADULTILOR",
+        "code": "27",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.9 SANATATE  <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=18&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Comunicate de presa</a>\n",
+        "code": "30",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.10 CULTURA  <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=7&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Comunicate de presa</a>",
+        "code": "32",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      },
+      {
+        "name": "A.11 SPORT",
+        "code": "33",
+        "childrenUrl": "context",
+        "comment": "",
+        "url": "context"
+      }
+    ]
+  },
+  "headers": {
+    "content-length": "3484",
+    "content-type": "application/json;charset=UTF-8",
+    "date": "Sat, 27 Dec 2025 12:42:06 GMT",
+    "server": "Apache-Coyote/1.1"
+  }
+}

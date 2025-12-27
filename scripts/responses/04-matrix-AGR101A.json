@@ -1,0 +1,700 @@
+{
+  "endpoint": "/matrix/AGR101A",
+  "method": "GET",
+  "status": 200,
+  "statusText": "OK",
+  "duration": 478,
+  "data": {
+    "ancestors": [
+      {
+        "name": "home",
+        "code": "",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      },
+      {
+        "name": "B. STATISTICA ECONOMICA",
+        "code": "2",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      },
+      {
+        "name": "AGRICULTURA  <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=1&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Comunicate de presa</a>\n",
+        "code": "45",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      },
+      {
+        "name": "FONDUL FUNCIAR",
+        "code": "4505",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      }
+    ],
+    "matrixName": "Suprafata fondului funciar dupa modul de folosinta, pe forme de proprietate, macroregiuni, regiuni de dezvoltare si judete",
+    "periodicitati": ["Anuala"],
+    "surseDeDate": [
+      {
+        "nume": "Fondul funciar <<2482>>",
+        "tip": "Surse statistice (INS)",
+        "linkNumber": 2482,
+        "codTip": 1
+      }
+    ],
+    "definitie": "Fondul funciar - este constituit din terenurile de orice fel, indiferent de destinatie, de titlul pe baza caruia sunt detinute sau de domeniul (public, privat, cooperatist, obstesc etc.) din care fac parte.",
+    "metodologie": "Fondul funciar  - suprafata tarii -  este format din teren arabil, pasuni si fanete naturale, vii si livezi, paduri si alte terenuri cu vegetatie forestiera, constructii, drumuri si cai ferate, ape si balti, alte suprafete. \r\nIn anul 1992 datele privind suprafata tarii si a judetelor au fost modificate fata de anii anteriori, conform masuratorii efectuate de Ministerul Agriculturii si Dezvoltarii Rurale prin organul sau de specialitate OCOTA, in colaborare cu Directia Topografica Militara. Noua masuratoare ia in consideratie variatiile de relief fata de cea anterioara, care se efectua la nivelul marii.",
+    "ultimaActualizare": "06-07-2015",
+    "observatii": "Indicatorul  Alte suprafete, in perioada 1990-1999, se calculeaza scazand din suprafata totala: suprafata agricola, padurile si apele. Incepand cu anul 2000, datele de la alte suprafete se asimileaza in continut cu suprafetele degradate si neproductive. \r\nNOTE EXPLICATIVE. In anul 1991 judetul Ilfov este inclus in Municipiul Bucuresti si SAI. Din anul 1992 pana in anul 1997, judetul Ilfov include si Municipiul Bucuresti. \r\nPana in anul 1995 nu avem date referitoare la proprietatea privata.\r\nIn anii 1996 si 1997 proprietatea privata se refera la domeniul privat particular, iar  anul 1998 include: gospodariile individuale si asociatiile simple; societati comerciale agricole ( L. 31/90) ;  societati comerciale  agricole ( L. 36/91)  \r\nIn anul 1999, proprietatea privata cuprinde proprietatea majoritar privata si proprietatea integral privata.\r\nDin anul 2000 proprietatea privata contine: proprietatea privata a statului, a unitatilor administrativ-teritoriale, a persoanelor juridice si a persoanelor fizice. In anul 2000 indicatorul: Paduri si alte terenuri forestiere nu include toata vegetatia forestiera din afara fondului forestier\r\nPana la finalizarea actiunii de cadastrare a tarii, de catre Agentia Nationala de Cadastru si Publicitate Imobiliara, seriile de date sunt blocate la nivelul anului 2014.",
+    "persoaneResponsabile": null,
+    "dimensionsMap": [
+      {
+        "options": [
+          {
+            "label": "Total",
+            "nomItemId": 5770,
+            "offset": 1,
+            "parentId": null
+          },
+          {
+            "label": "Agricola",
+            "nomItemId": 5771,
+            "offset": 2,
+            "parentId": null
+          },
+          {
+            "label": "   Arabila",
+            "nomItemId": 5772,
+            "offset": 3,
+            "parentId": null
+          },
+          {
+            "label": "   Pasuni",
+            "nomItemId": 5773,
+            "offset": 4,
+            "parentId": null
+          },
+          {
+            "label": "   Finete",
+            "nomItemId": 5774,
+            "offset": 5,
+            "parentId": null
+          },
+          {
+            "label": "   Vii si pepiniere viticole",
+            "nomItemId": 5775,
+            "offset": 6,
+            "parentId": null
+          },
+          {
+            "label": "   Livezi si pepiniere pomicole",
+            "nomItemId": 5776,
+            "offset": 7,
+            "parentId": null
+          },
+          {
+            "label": "Terenuri neagricole total",
+            "nomItemId": 13874,
+            "offset": 8,
+            "parentId": null
+          },
+          {
+            "label": "   Paduri si alta vegetatie forestiera",
+            "nomItemId": 5777,
+            "offset": 9,
+            "parentId": null
+          },
+          {
+            "label": "   Ocupata cu ape, balti",
+            "nomItemId": 5778,
+            "offset": 10,
+            "parentId": null
+          },
+          {
+            "label": "   Ocupata cu constructii",
+            "nomItemId": 5780,
+            "offset": 11,
+            "parentId": null
+          },
+          {
+            "label": "   Cai de comunicatii si cai ferate",
+            "nomItemId": 5781,
+            "offset": 12,
+            "parentId": null
+          },
+          {
+            "label": "   Terenuri degradate si neproductive",
+            "nomItemId": 5782,
+            "offset": 13,
+            "parentId": null
+          },
+          {
+            "label": "Alte suprafete",
+            "nomItemId": 14068,
+            "offset": 14,
+            "parentId": null
+          }
+        ],
+        "dimCode": 1,
+        "label": "Modul de folosinta a fondului funciar"
+      },
+      {
+        "options": [
+          {
+            "label": "Total",
+            "nomItemId": 7386,
+            "offset": 1,
+            "parentId": null
+          },
+          {
+            "label": "Proprietate privata",
+            "nomItemId": 7387,
+            "offset": 2,
+            "parentId": null
+          }
+        ],
+        "dimCode": 2,
+        "label": "Forme de proprietate "
+      },
+      {
+        "options": [
+          {
+            "label": "TOTAL",
+            "nomItemId": 112,
+            "offset": 1,
+            "parentId": null
+          },
+          {
+            "label": "MACROREGIUNEA UNU",
+            "nomItemId": 21295,
+            "offset": 2,
+            "parentId": null
+          },
+          {
+            "label": "Regiunea NORD-VEST",
+            "nomItemId": 5726,
+            "offset": 3,
+            "parentId": null
+          },
+          {
+            "label": "Bihor",
+            "nomItemId": 3068,
+            "offset": 4,
+            "parentId": null
+          },
+          {
+            "label": "Bistrita-Nasaud",
+            "nomItemId": 3069,
+            "offset": 5,
+            "parentId": null
+          },
+          {
+            "label": "Cluj",
+            "nomItemId": 3075,
+            "offset": 6,
+            "parentId": null
+          },
+          {
+            "label": "Maramures",
+            "nomItemId": 3087,
+            "offset": 7,
+            "parentId": null
+          },
+          {
+            "label": "Satu Mare",
+            "nomItemId": 3093,
+            "offset": 8,
+            "parentId": null
+          },
+          {
+            "label": "Salaj",
+            "nomItemId": 3094,
+            "offset": 9,
+            "parentId": null
+          },
+          {
+            "label": "Regiunea CENTRU",
+            "nomItemId": 5727,
+            "offset": 10,
+            "parentId": null
+          },
+          {
+            "label": "Alba",
+            "nomItemId": 3064,
+            "offset": 11,
+            "parentId": null
+          },
+          {
+            "label": "Brasov",
+            "nomItemId": 3071,
+            "offset": 12,
+            "parentId": null
+          },
+          {
+            "label": "Covasna",
+            "nomItemId": 3077,
+            "offset": 13,
+            "parentId": null
+          },
+          {
+            "label": "Harghita",
+            "nomItemId": 3082,
+            "offset": 14,
+            "parentId": null
+          },
+          {
+            "label": "Mures",
+            "nomItemId": 3089,
+            "offset": 15,
+            "parentId": null
+          },
+          {
+            "label": "Sibiu",
+            "nomItemId": 3095,
+            "offset": 16,
+            "parentId": null
+          },
+          {
+            "label": "MACROREGIUNEA DOI",
+            "nomItemId": 20676,
+            "offset": 17,
+            "parentId": null
+          },
+          {
+            "label": "Regiunea NORD-EST",
+            "nomItemId": 5721,
+            "offset": 18,
+            "parentId": null
+          },
+          {
+            "label": "Bacau",
+            "nomItemId": 3067,
+            "offset": 19,
+            "parentId": null
+          },
+          {
+            "label": "Botosani",
+            "nomItemId": 3070,
+            "offset": 20,
+            "parentId": null
+          },
+          {
+            "label": "Iasi",
+            "nomItemId": 3085,
+            "offset": 21,
+            "parentId": null
+          },
+          {
+            "label": "Neamt",
+            "nomItemId": 3090,
+            "offset": 22,
+            "parentId": null
+          },
+          {
+            "label": "Suceava",
+            "nomItemId": 3096,
+            "offset": 23,
+            "parentId": null
+          },
+          {
+            "label": "Vaslui",
+            "nomItemId": 3100,
+            "offset": 24,
+            "parentId": null
+          },
+          {
+            "label": "Regiunea SUD-EST",
+            "nomItemId": 5722,
+            "offset": 25,
+            "parentId": null
+          },
+          {
+            "label": "Braila",
+            "nomItemId": 3072,
+            "offset": 26,
+            "parentId": null
+          },
+          {
+            "label": "Buzau",
+            "nomItemId": 3073,
+            "offset": 27,
+            "parentId": null
+          },
+          {
+            "label": "Constanta",
+            "nomItemId": 3076,
+            "offset": 28,
+            "parentId": null
+          },
+          {
+            "label": "Galati",
+            "nomItemId": 3080,
+            "offset": 29,
+            "parentId": null
+          },
+          {
+            "label": "Tulcea",
+            "nomItemId": 3099,
+            "offset": 30,
+            "parentId": null
+          },
+          {
+            "label": "Vrancea",
+            "nomItemId": 3102,
+            "offset": 31,
+            "parentId": null
+          },
+          {
+            "label": "MACROREGIUNEA TREI",
+            "nomItemId": 20677,
+            "offset": 32,
+            "parentId": null
+          },
+          {
+            "label": "Regiunea SUD-MUNTENIA",
+            "nomItemId": 5723,
+            "offset": 33,
+            "parentId": null
+          },
+          {
+            "label": "Arges",
+            "nomItemId": 3066,
+            "offset": 34,
+            "parentId": null
+          },
+          {
+            "label": "Calarasi",
+            "nomItemId": 3105,
+            "offset": 35,
+            "parentId": null
+          },
+          {
+            "label": "Dambovita",
+            "nomItemId": 3078,
+            "offset": 36,
+            "parentId": null
+          },
+          {
+            "label": "Giurgiu",
+            "nomItemId": 3106,
+            "offset": 37,
+            "parentId": null
+          },
+          {
+            "label": "Ialomita",
+            "nomItemId": 3084,
+            "offset": 38,
+            "parentId": null
+          },
+          {
+            "label": "Prahova",
+            "nomItemId": 3092,
+            "offset": 39,
+            "parentId": null
+          },
+          {
+            "label": "Teleorman",
+            "nomItemId": 3097,
+            "offset": 40,
+            "parentId": null
+          },
+          {
+            "label": "Regiunea BUCURESTI - ILFOV",
+            "nomItemId": 5728,
+            "offset": 41,
+            "parentId": null
+          },
+          {
+            "label": "Ilfov",
+            "nomItemId": 3086,
+            "offset": 42,
+            "parentId": null
+          },
+          {
+            "label": "Municipiul Bucuresti",
+            "nomItemId": 3104,
+            "offset": 43,
+            "parentId": null
+          },
+          {
+            "label": "Mun. Bucuresti -incl. SAI",
+            "nomItemId": 3103,
+            "offset": 44,
+            "parentId": null
+          },
+          {
+            "label": "MACROREGIUNEA PATRU",
+            "nomItemId": 20678,
+            "offset": 45,
+            "parentId": null
+          },
+          {
+            "label": "Regiunea SUD-VEST OLTENIA",
+            "nomItemId": 5724,
+            "offset": 46,
+            "parentId": null
+          },
+          {
+            "label": "Dolj",
+            "nomItemId": 3079,
+            "offset": 47,
+            "parentId": null
+          },
+          {
+            "label": "Gorj",
+            "nomItemId": 3081,
+            "offset": 48,
+            "parentId": null
+          },
+          {
+            "label": "Mehedinti",
+            "nomItemId": 3088,
+            "offset": 49,
+            "parentId": null
+          },
+          {
+            "label": "Olt",
+            "nomItemId": 3091,
+            "offset": 50,
+            "parentId": null
+          },
+          {
+            "label": "Valcea",
+            "nomItemId": 3101,
+            "offset": 51,
+            "parentId": null
+          },
+          {
+            "label": "Regiunea VEST",
+            "nomItemId": 5725,
+            "offset": 52,
+            "parentId": null
+          },
+          {
+            "label": "Arad",
+            "nomItemId": 3065,
+            "offset": 53,
+            "parentId": null
+          },
+          {
+            "label": "Caras-Severin",
+            "nomItemId": 3074,
+            "offset": 54,
+            "parentId": null
+          },
+          {
+            "label": "Hunedoara",
+            "nomItemId": 3083,
+            "offset": 55,
+            "parentId": null
+          },
+          {
+            "label": "Timis",
+            "nomItemId": 3098,
+            "offset": 56,
+            "parentId": null
+          }
+        ],
+        "dimCode": 3,
+        "label": "Macroregiuni, regiuni de dezvoltare si judete"
+      },
+      {
+        "options": [
+          {
+            "label": "Anul 1990",
+            "nomItemId": 4247,
+            "offset": 1,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1991",
+            "nomItemId": 4266,
+            "offset": 2,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1992",
+            "nomItemId": 4285,
+            "offset": 3,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1993",
+            "nomItemId": 4304,
+            "offset": 4,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1994",
+            "nomItemId": 4323,
+            "offset": 5,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1995",
+            "nomItemId": 4342,
+            "offset": 6,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1996",
+            "nomItemId": 4361,
+            "offset": 7,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1997",
+            "nomItemId": 4380,
+            "offset": 8,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1998",
+            "nomItemId": 4399,
+            "offset": 9,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1999",
+            "nomItemId": 4418,
+            "offset": 10,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2000",
+            "nomItemId": 4437,
+            "offset": 11,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2001",
+            "nomItemId": 4456,
+            "offset": 12,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2002",
+            "nomItemId": 4475,
+            "offset": 13,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2003",
+            "nomItemId": 4494,
+            "offset": 14,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2004",
+            "nomItemId": 4513,
+            "offset": 15,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2005",
+            "nomItemId": 4532,
+            "offset": 16,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2006",
+            "nomItemId": 4551,
+            "offset": 17,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2007",
+            "nomItemId": 4570,
+            "offset": 18,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2008",
+            "nomItemId": 4589,
+            "offset": 19,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2009",
+            "nomItemId": 4608,
+            "offset": 20,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2010",
+            "nomItemId": 4627,
+            "offset": 21,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2011",
+            "nomItemId": 4646,
+            "offset": 22,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2012",
+            "nomItemId": 4665,
+            "offset": 23,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2013",
+            "nomItemId": 4684,
+            "offset": 24,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2014",
+            "nomItemId": 4703,
+            "offset": 25,
+            "parentId": null
+          }
+        ],
+        "dimCode": 4,
+        "label": "Ani"
+      },
+      {
+        "options": [
+          {
+            "label": "Hectare",
+            "nomItemId": 9427,
+            "offset": 1,
+            "parentId": null
+          }
+        ],
+        "dimCode": 5,
+        "label": "UM: Ha"
+      }
+    ],
+    "intrerupere": {
+      "lastPeriod": "Anul 2014",
+      "nextMatrixCode": null
+    },
+    "continuareSerie": null,
+    "details": {
+      "nomJud": 0,
+      "nomLoc": 0,
+      "matMaxDim": 5,
+      "matUMSpec": 0,
+      "matSiruta": 0,
+      "matCaen1": 0,
+      "matCaen2": 0,
+      "matRegJ": 3,
+      "matCharge": 0,
+      "matViews": 0,
+      "matDownloads": 0,
+      "matActive": 1,
+      "matTime": 4
+    }
+  },
+  "headers": {
+    "content-length": "10451",
+    "content-type": "application/json;charset=UTF-8",
+    "date": "Sat, 27 Dec 2025 12:42:12 GMT",
+    "server": "Apache-Coyote/1.1"
+  }
+}

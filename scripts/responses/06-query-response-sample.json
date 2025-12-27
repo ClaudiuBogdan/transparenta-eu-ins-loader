@@ -1,0 +1,12 @@
+{
+  "endpoint": "/matrix/dataSet/POP105A",
+  "method": "POST",
+  "status": 200,
+  "statusText": "OK",
+  "duration": 787,
+  "error": "Failed to parse JSON response",
+  "headers": {
+    "date": "Sat, 27 Dec 2025 12:42:16 GMT",
+    "server": "Apache-Coyote/1.1"
+  }
+}

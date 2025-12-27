@@ -1,0 +1,13 @@
+{
+  "endpoint": "/context/999999",
+  "method": "GET",
+  "status": 400,
+  "statusText": "Bad Request",
+  "duration": 76,
+  "error": "{\"timestamp\":1766839354718,\"status\":400,\"error\":\"Bad Request\",\"exception\":\"org.springframework.beans.TypeMismatchException\",\"message\":\"Failed to convert value of type [java.lang.String] to required type [short]; nested exception is java.lang.NumberFormatException: Value out of range. Value:\\\"999999\\\" Radix:10\",\"path\":\"/tempo-ins/context/999999\"}",
+  "headers": {
+    "content-type": "application/json;charset=UTF-8",
+    "date": "Sat, 27 Dec 2025 12:42:34 GMT",
+    "server": "Apache-Coyote/1.1"
+  }
+}

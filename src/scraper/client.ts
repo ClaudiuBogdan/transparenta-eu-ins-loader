@@ -1,6 +1,11 @@
 import { apiLogger } from "../logger.js";
 
-import type { InsContext, InsMatrix, InsQueryRequest } from "../types/index.js";
+import type {
+  InsContext,
+  InsMatrix,
+  InsQueryRequest,
+  InsMatrixListItem,
+} from "../types/index.js";
 
 const BASE_URL = "http://statistici.insse.ro:8077/tempo-ins";
 const RATE_LIMIT_MS = 750; // 0.75 seconds between requests
@@ -74,29 +79,27 @@ export async function fetchContexts(): Promise<InsContext[]> {
 }
 
 /**
- * Fetch a specific context and its children
+ * Fetch a specific context and its children by code
  */
-export async function fetchContext(id: number): Promise<InsContext> {
-  const url = `${BASE_URL}/context/${String(id)}`;
-  apiLogger.info({ url, contextId: id }, "Fetching context by ID");
+export async function fetchContext(code: string): Promise<InsContext[]> {
+  const url = `${BASE_URL}/context/${code}`;
+  apiLogger.info({ url, contextCode: code }, "Fetching context by code");
 
   const response = await rateLimitedFetch(url);
   if (!response.ok) {
     apiLogger.error(
       {
-        contextId: id,
+        contextCode: code,
         status: response.status,
         statusText: response.statusText,
       },
       "Failed to fetch context"
     );
-    throw new Error(
-      `Failed to fetch context ${String(id)}: ${response.statusText}`
-    );
+    throw new Error(`Failed to fetch context ${code}: ${response.statusText}`);
   }
 
-  const data = (await response.json()) as InsContext;
-  apiLogger.debug({ contextId: id, data }, "Successfully fetched context");
+  const data = (await response.json()) as InsContext[];
+  apiLogger.debug({ contextCode: code, data }, "Successfully fetched context");
 
   return data;
 }
@@ -104,9 +107,7 @@ export async function fetchContext(id: number): Promise<InsContext> {
 /**
  * Fetch all available matrices
  */
-export async function fetchMatricesList(): Promise<
-  { code: string; name: string }[]
-> {
+export async function fetchMatricesList(): Promise<InsMatrixListItem[]> {
   const url = `${BASE_URL}/matrix/matrices?lang=ro`;
   apiLogger.info({ url }, "Fetching all matrices list");
 
@@ -119,7 +120,7 @@ export async function fetchMatricesList(): Promise<
     throw new Error(`Failed to fetch matrices: ${response.statusText}`);
   }
 
-  const data = (await response.json()) as { code: string; name: string }[];
+  const data = (await response.json()) as InsMatrixListItem[];
   apiLogger.debug(
     { matrixCount: data.length, data },
     "Successfully fetched matrices list"
@@ -155,12 +156,12 @@ export async function fetchMatrix(code: string): Promise<InsMatrix> {
   );
 
   // Log dimensions at debug level
-  for (const dim of data.dimensions) {
+  for (const dim of data.dimensionsMap) {
     apiLogger.debug(
       {
         matrixCode: code,
-        dimensionId: dim.dimensionId,
-        dimensionName: dim.dimensionName,
+        dimCode: dim.dimCode,
+        label: dim.label,
         optionCount: dim.options.length,
       },
       "Matrix dimension"
@@ -169,7 +170,7 @@ export async function fetchMatrix(code: string): Promise<InsMatrix> {
     // Log dimension options at trace level
     for (const opt of dim.options) {
       apiLogger.trace(
-        { matrixCode: code, dimensionId: dim.dimensionId, option: opt },
+        { matrixCode: code, dimCode: dim.dimCode, option: opt },
         "Dimension option"
       );
     }
@@ -179,23 +180,18 @@ export async function fetchMatrix(code: string): Promise<InsMatrix> {
 }
 
 /**
- * Query data from a matrix
+ * Query data from a matrix using the /pivot endpoint
+ * Returns CSV-formatted text data
  */
-export async function queryMatrix(
-  request: InsQueryRequest
-): Promise<unknown[][]> {
-  const url = `${BASE_URL}/matrix/dataSet/${request.matrixName}`;
-  const estimatedCells = estimateCellCount(request.arr);
+export async function queryMatrix(request: InsQueryRequest): Promise<string> {
+  const url = `${BASE_URL}/pivot`;
 
   apiLogger.info(
     {
       url,
-      matrixName: request.matrixName,
+      matCode: request.matCode,
       language: request.language,
-      dimensionCount: request.arr.length,
-      estimatedCells,
-      nomJud: request.matrixDetails.nomJud,
-      nomLoc: request.matrixDetails.nomLoc,
+      matMaxDim: request.matMaxDim,
     },
     "Querying matrix data"
   );
@@ -214,23 +210,26 @@ export async function queryMatrix(
   if (!response.ok) {
     apiLogger.error(
       {
-        matrixName: request.matrixName,
+        matCode: request.matCode,
         status: response.status,
         statusText: response.statusText,
       },
       "Failed to query matrix"
     );
     throw new Error(
-      `Failed to query matrix ${request.matrixName}: ${response.statusText}`
+      `Failed to query matrix ${request.matCode}: ${response.statusText}`
     );
   }
 
-  const data = (await response.json()) as unknown[][];
+  // The pivot endpoint returns CSV text, not JSON
+  const data = await response.text();
+  const rowCount = data.split("\n").filter((row) => row.trim() !== "").length;
+
   apiLogger.debug(
     {
-      matrixName: request.matrixName,
-      rowCount: data.length,
-      sampleRow: data[0],
+      matCode: request.matCode,
+      rowCount,
+      sampleData: data.slice(0, 200),
     },
     "Successfully queried matrix data"
   );
@@ -239,20 +238,29 @@ export async function queryMatrix(
 }
 
 /**
+ * Build an encQuery string from selected nomItemIds
+ * @param selections Array of nomItemId arrays, one per dimension
+ * @returns Colon-separated query string (e.g., "1,2:105:108:112:4494:9685")
+ */
+export function buildEncQuery(selections: number[][]): string {
+  return selections.map((dimSelections) => dimSelections.join(",")).join(":");
+}
+
+/**
  * Estimate the number of cells a query will return
  */
-export function estimateCellCount(dimensionSelections: unknown[][]): number {
-  return dimensionSelections.reduce((acc, dim) => acc * dim.length, 1);
+export function estimateCellCount(selections: number[][]): number {
+  return selections.reduce((acc, dim) => acc * dim.length, 1);
 }
 
 /**
  * Check if a query would exceed the 30,000 cell limit
  */
 export function wouldExceedLimit(
-  dimensionSelections: unknown[][],
+  selections: number[][],
   limit = 30000
 ): boolean {
-  const cellCount = estimateCellCount(dimensionSelections);
+  const cellCount = estimateCellCount(selections);
   const exceeds = cellCount > limit;
 
   if (exceeds) {
@@ -263,4 +271,14 @@ export function wouldExceedLimit(
   }
 
   return exceeds;
+}
+
+/**
+ * Parse CSV response from pivot endpoint into rows
+ */
+export function parsePivotResponse(csvText: string): string[][] {
+  return csvText
+    .split("\n")
+    .filter((row) => row.trim() !== "")
+    .map((row) => row.split(", "));
 }

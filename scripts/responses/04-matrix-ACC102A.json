@@ -1,0 +1,580 @@
+{
+  "endpoint": "/matrix/ACC102A",
+  "method": "GET",
+  "status": 200,
+  "statusText": "OK",
+  "duration": 735,
+  "data": {
+    "ancestors": [
+      {
+        "name": "home",
+        "code": "",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      },
+      {
+        "name": "A. STATISTICA SOCIALA",
+        "code": "1",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      },
+      {
+        "name": "FORTA DE MUNCA  <a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=14&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Forta de munca si castiguri salariale-Comunicate de presa</a>\n;\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n      \n\n\n\n\n\n\n                       \n<a href=\"https://insse.ro/cms/ro/comunicate-de-presa-view?field_categorie_value_i18n%5B%5D=14a&field_cuvinte_cheie_value=&created=All&items_per_page=10\" target=\"_blank\">Ocuparea si somajul-Comunicate de presa</a>\n\n",
+        "code": "15",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      },
+      {
+        "name": "CONDITII DE MUNCA",
+        "code": "1520",
+        "childrenUrl": "context",
+        "comment": null,
+        "url": "context"
+      }
+    ],
+    "matrixName": "Accidentati in munca pe activitati economice CAEN Rev.1 si categorii de accidente de munca",
+    "periodicitati": ["Anuala"],
+    "surseDeDate": [
+      {
+        "nume": "Ministerul Muncii si Solidaritatii Sociale",
+        "tip": "Surse administrative",
+        "linkNumber": 0,
+        "codTip": 2
+      }
+    ],
+    "definitie": "Prin accident de munca se intelege vatamarea violenta a organismului, precum si intoxicatia acuta profesionala, care au loc in timpul procesului de munca sau in indeplinirea indatoririlor de serviciu si care provoaca incapacitate temporara de munca de cel putin 3 zile, invaliditate sau deces. Numarul  accidentatilor in  munca reprezinta numarul persoanelor care s-au accidentat la locul de munca, indiferent de natura accidentului si de urmarile produse de acesta. Din numarul accidentatilor sunt excluse cazurile de accidente de traseu.\nRata accidentelor de munca reprezinta frecventa de accidentare sau numarul accidentatilor ce revin la 1000 salariati.",
+    "metodologie": "Datele cuprind accidentatii in munca inregistrati conform definitiei accidentelor de munca din Legea 319/2006 a securitatii si sanatatii in munca, cu modificarile si completarile ulterioare, cu exceptia accidentelor de traseu.\n\n<a href=\"https://insse.ro/cms/files/Rapoarte%20de%20calitate/sanatate/Statistica-accidentelor-de-munca-din-surse-administrative.pdf\" target=\"_blank\"> Raport de metadate si calitate </a>\n\n",
+    "ultimaActualizare": "08-09-2008",
+    "observatii": "Sursa datelor este Inspectia muncii - Ministerul Muncii si Protectiei Sociale, care a furnizat date incepand cu anul 1992.\nPentru perioada 1992-1995, datele sunt disponibile numai la nivel de total.",
+    "persoaneResponsabile": null,
+    "dimensionsMap": [
+      {
+        "options": [
+          {
+            "label": "Total",
+            "nomItemId": 12315,
+            "offset": 1,
+            "parentId": null
+          },
+          {
+            "label": "01 Agricultura, vanatoare si servicii anexe",
+            "nomItemId": 12316,
+            "offset": 2,
+            "parentId": null
+          },
+          {
+            "label": "02 Silvicultura, exploatare forestiera si servicii anexe",
+            "nomItemId": 12317,
+            "offset": 3,
+            "parentId": null
+          },
+          {
+            "label": "05 Pescuitul, piscicultura si serviciile anexe",
+            "nomItemId": 12318,
+            "offset": 4,
+            "parentId": null
+          },
+          {
+            "label": "10 Extractia si prepararea carbunelui",
+            "nomItemId": 12319,
+            "offset": 5,
+            "parentId": null
+          },
+          {
+            "label": "11 Extractia hidrocarburilor si servicii anexe",
+            "nomItemId": 12320,
+            "offset": 6,
+            "parentId": null
+          },
+          {
+            "label": "12 Extractia si prepararea minereurilor radioactive",
+            "nomItemId": 12321,
+            "offset": 7,
+            "parentId": null
+          },
+          {
+            "label": "13 Extractia si prepararea minereurilor metalifere",
+            "nomItemId": 12322,
+            "offset": 8,
+            "parentId": null
+          },
+          {
+            "label": "14 Alte activitati extractive",
+            "nomItemId": 12323,
+            "offset": 9,
+            "parentId": null
+          },
+          {
+            "label": "15 Industria alimentara si a bauturilor",
+            "nomItemId": 12324,
+            "offset": 10,
+            "parentId": null
+          },
+          {
+            "label": "16 Fabricarea produselor din tutun",
+            "nomItemId": 12325,
+            "offset": 11,
+            "parentId": null
+          },
+          {
+            "label": "17 Fabricarea produselor textile",
+            "nomItemId": 12326,
+            "offset": 12,
+            "parentId": null
+          },
+          {
+            "label": "18 Fabricarea articolelor de imbracaminte; prepararea si vopsirea blanurilor",
+            "nomItemId": 12327,
+            "offset": 13,
+            "parentId": null
+          },
+          {
+            "label": "19 Tabacirea si finisarea pieilor; fabricarea articolelor de voiaj si marochinarie, a harnasamentului si incaltamintei",
+            "nomItemId": 12328,
+            "offset": 14,
+            "parentId": null
+          },
+          {
+            "label": "20 Fabricarea lemnului si a produselor din lemn si pluta, cu exceptia mobilei; fabricarea articolelor din impletitura de pai si alte materiale",
+            "nomItemId": 12329,
+            "offset": 15,
+            "parentId": null
+          },
+          {
+            "label": "21 Fabricarea celulozei, hartiei si a produselor din hartie",
+            "nomItemId": 12330,
+            "offset": 16,
+            "parentId": null
+          },
+          {
+            "label": "22 Edituri, poligrafie si reproducerea inregistrarilor pe suporti",
+            "nomItemId": 12331,
+            "offset": 17,
+            "parentId": null
+          },
+          {
+            "label": "23 Industria de prelucrare a titeiului, cocsificarea carbunelui si tratarea combustibililor nucleari",
+            "nomItemId": 12332,
+            "offset": 18,
+            "parentId": null
+          },
+          {
+            "label": "24 Fabricarea substantelor si a produselor chimice",
+            "nomItemId": 12333,
+            "offset": 19,
+            "parentId": null
+          },
+          {
+            "label": "25 Fabricarea produselor din cauciuc si mase plastice",
+            "nomItemId": 12334,
+            "offset": 20,
+            "parentId": null
+          },
+          {
+            "label": "26 Fabricarea altor produse din minerale nemetalice",
+            "nomItemId": 12335,
+            "offset": 21,
+            "parentId": null
+          },
+          {
+            "label": "27 Industria metalurgica",
+            "nomItemId": 12336,
+            "offset": 22,
+            "parentId": null
+          },
+          {
+            "label": "28 Industria constructiilor metalice si a produselor din metal (exclusiv masini, utilaje si instalatii)",
+            "nomItemId": 12337,
+            "offset": 23,
+            "parentId": null
+          },
+          {
+            "label": "29 Industria de masini si echipamente",
+            "nomItemId": 12338,
+            "offset": 24,
+            "parentId": null
+          },
+          {
+            "label": "30 Industria de mijloace ale tehnicii de calcul si de birou",
+            "nomItemId": 12339,
+            "offset": 25,
+            "parentId": null
+          },
+          {
+            "label": "31 Industria de masini si aparate electrice",
+            "nomItemId": 12342,
+            "offset": 26,
+            "parentId": null
+          },
+          {
+            "label": "32 Industria de echipamente pentru radio, televiziune si comunicatii",
+            "nomItemId": 12341,
+            "offset": 27,
+            "parentId": null
+          },
+          {
+            "label": "33 Industria de aparatura si instrum. medicale, de precizie, optice si fotografice, ceasornicarie",
+            "nomItemId": 12340,
+            "offset": 28,
+            "parentId": null
+          },
+          {
+            "label": "34 Industria mijloacelor de transport rutier",
+            "nomItemId": 12343,
+            "offset": 29,
+            "parentId": null
+          },
+          {
+            "label": "35 Industria altor mijloace de transport n.c.a.",
+            "nomItemId": 12344,
+            "offset": 30,
+            "parentId": null
+          },
+          {
+            "label": "36 Productia de mobilier si alte activitati industriale n.c.a",
+            "nomItemId": 12345,
+            "offset": 31,
+            "parentId": null
+          },
+          {
+            "label": "37 Recuperarea deseurilor si resturilor de materiale reciclabile",
+            "nomItemId": 12346,
+            "offset": 32,
+            "parentId": null
+          },
+          {
+            "label": "40 Productia si furnizarea de energie electrica si termica, gaze si apa",
+            "nomItemId": 12347,
+            "offset": 33,
+            "parentId": null
+          },
+          {
+            "label": "41 Apa distribuita; servicii aferente distributiei apei",
+            "nomItemId": 12348,
+            "offset": 34,
+            "parentId": null
+          },
+          {
+            "label": "45 Lucrari de constructii",
+            "nomItemId": 12349,
+            "offset": 35,
+            "parentId": null
+          },
+          {
+            "label": "50 Vanzarea, intretinerea si repararea autovehiculelor si a motocicletelor; comert cu amanuntul al carburantilor pentru autovehicule",
+            "nomItemId": 12350,
+            "offset": 36,
+            "parentId": null
+          },
+          {
+            "label": "51 Comert cu ridicata (cu exceptia autovehiculelor si motocicletelor)",
+            "nomItemId": 12351,
+            "offset": 37,
+            "parentId": null
+          },
+          {
+            "label": "52 Comert cu amanuntul (cu exceptia autovehiculelor si motocicletelor); repararea bunurilor personale si gospodaresti",
+            "nomItemId": 12352,
+            "offset": 38,
+            "parentId": null
+          },
+          {
+            "label": "55 Hoteluri si restaurante",
+            "nomItemId": 12353,
+            "offset": 39,
+            "parentId": null
+          },
+          {
+            "label": "60 Transporturi tereste, transporturi prin conducte",
+            "nomItemId": 12354,
+            "offset": 40,
+            "parentId": null
+          },
+          {
+            "label": "61 Transporturi pe apa",
+            "nomItemId": 12355,
+            "offset": 41,
+            "parentId": null
+          },
+          {
+            "label": "62 Transporturi aeriene",
+            "nomItemId": 12356,
+            "offset": 42,
+            "parentId": null
+          },
+          {
+            "label": "63 Activitati anexe si auxiliare de transport, activitati ale agentiilor de turism",
+            "nomItemId": 12357,
+            "offset": 43,
+            "parentId": null
+          },
+          {
+            "label": "64 Posta si telecomunicatii",
+            "nomItemId": 12358,
+            "offset": 44,
+            "parentId": null
+          },
+          {
+            "label": "65 Activitati ale institutiilor financiare si bancare cu exceptia activ de asigurari si ale caselor de pensii",
+            "nomItemId": 12359,
+            "offset": 45,
+            "parentId": null
+          },
+          {
+            "label": "66 Activitati de asigurari si ale caselor de pensii cu exceptia celor din sistemul public de asigurari sociale",
+            "nomItemId": 12360,
+            "offset": 46,
+            "parentId": null
+          },
+          {
+            "label": "67 Activitati auxiliare ale institutiilor financiare si de asigurari",
+            "nomItemId": 12361,
+            "offset": 47,
+            "parentId": null
+          },
+          {
+            "label": "70 Tranzactii imobiliare",
+            "nomItemId": 12362,
+            "offset": 48,
+            "parentId": null
+          },
+          {
+            "label": "71 Inchirierea masinilor si echipamentelor fara operator si a bunurilor personale si gospodaresti",
+            "nomItemId": 12363,
+            "offset": 49,
+            "parentId": null
+          },
+          {
+            "label": "72 Realizarea de produse software, servicii informatice conexe",
+            "nomItemId": 12364,
+            "offset": 50,
+            "parentId": null
+          },
+          {
+            "label": "73 Cercetare - dezvoltare",
+            "nomItemId": 12365,
+            "offset": 51,
+            "parentId": null
+          },
+          {
+            "label": "74 Alte activitati de servicii prestate in principal intreprinderilor",
+            "nomItemId": 12366,
+            "offset": 52,
+            "parentId": null
+          },
+          {
+            "label": "75 Servicii de administratie publica si aparare; asigurari sociale din sistemul public",
+            "nomItemId": 12367,
+            "offset": 53,
+            "parentId": null
+          },
+          {
+            "label": "80 Invatamant",
+            "nomItemId": 12368,
+            "offset": 54,
+            "parentId": null
+          },
+          {
+            "label": "85 Sanatate si asistenta sociala",
+            "nomItemId": 12369,
+            "offset": 55,
+            "parentId": null
+          },
+          {
+            "label": "90 Asanarea si indepartarea gunoaielor; salubritate si activitati similare",
+            "nomItemId": 12370,
+            "offset": 56,
+            "parentId": null
+          },
+          {
+            "label": "91 Activitati  asociative diverse",
+            "nomItemId": 12371,
+            "offset": 57,
+            "parentId": null
+          },
+          {
+            "label": "92 Activitati recreative, culturale si sportive",
+            "nomItemId": 12372,
+            "offset": 58,
+            "parentId": null
+          },
+          {
+            "label": "93 Alte activitati de servicii",
+            "nomItemId": 12373,
+            "offset": 59,
+            "parentId": null
+          }
+        ],
+        "dimCode": 1,
+        "label": "CAEN Rev.1 (activitati ale economiei nationale)"
+      },
+      {
+        "options": [
+          {
+            "label": "Total ",
+            "nomItemId": 5733,
+            "offset": 1,
+            "parentId": null
+          },
+          {
+            "label": "Incapacitate temporara de munca",
+            "nomItemId": 5734,
+            "offset": 2,
+            "parentId": null
+          },
+          {
+            "label": "Mortale",
+            "nomItemId": 5735,
+            "offset": 3,
+            "parentId": null
+          }
+        ],
+        "dimCode": 2,
+        "label": "Categorii de accidente de munca"
+      },
+      {
+        "options": [
+          {
+            "label": "Anul 1992",
+            "nomItemId": 4285,
+            "offset": 1,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1993",
+            "nomItemId": 4304,
+            "offset": 2,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1994",
+            "nomItemId": 4323,
+            "offset": 3,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1995",
+            "nomItemId": 4342,
+            "offset": 4,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1996",
+            "nomItemId": 4361,
+            "offset": 5,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1997",
+            "nomItemId": 4380,
+            "offset": 6,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1998",
+            "nomItemId": 4399,
+            "offset": 7,
+            "parentId": null
+          },
+          {
+            "label": "Anul 1999",
+            "nomItemId": 4418,
+            "offset": 8,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2000",
+            "nomItemId": 4437,
+            "offset": 9,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2001",
+            "nomItemId": 4456,
+            "offset": 10,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2002",
+            "nomItemId": 4475,
+            "offset": 11,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2003",
+            "nomItemId": 4494,
+            "offset": 12,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2004",
+            "nomItemId": 4513,
+            "offset": 13,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2005",
+            "nomItemId": 4532,
+            "offset": 14,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2006",
+            "nomItemId": 4551,
+            "offset": 15,
+            "parentId": null
+          },
+          {
+            "label": "Anul 2007",
+            "nomItemId": 4570,
+            "offset": 16,
+            "parentId": null
+          }
+        ],
+        "dimCode": 3,
+        "label": "Ani"
+      },
+      {
+        "options": [
+          {
+            "label": "Numar persoane",
+            "nomItemId": 9685,
+            "offset": 1,
+            "parentId": null
+          }
+        ],
+        "dimCode": 4,
+        "label": "UM: Numar persoane"
+      }
+    ],
+    "intrerupere": {
+      "lastPeriod": "Anul 2007",
+      "nextMatrixCode": "ACC102C"
+    },
+    "continuareSerie": null,
+    "details": {
+      "nomJud": 0,
+      "nomLoc": 0,
+      "matMaxDim": 4,
+      "matUMSpec": 0,
+      "matSiruta": 0,
+      "matCaen1": 0,
+      "matCaen2": 0,
+      "matRegJ": 0,
+      "matCharge": 0,
+      "matViews": 0,
+      "matDownloads": 0,
+      "matActive": 1,
+      "matTime": 3
+    }
+  },
+  "headers": {
+    "content-length": "11401",
+    "content-type": "application/json;charset=UTF-8",
+    "date": "Sat, 27 Dec 2025 12:42:15 GMT",
+    "server": "Apache-Coyote/1.1"
+  }
+}

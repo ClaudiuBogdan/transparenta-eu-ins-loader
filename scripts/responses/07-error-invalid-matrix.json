@@ -1,0 +1,14 @@
+{
+  "endpoint": "/matrix/INVALID123",
+  "method": "GET",
+  "status": 200,
+  "statusText": "OK",
+  "duration": 723,
+  "error": "Failed to parse JSON response",
+  "headers": {
+    "content-length": "0",
+    "content-type": "application/json;charset=UTF-8",
+    "date": "Sat, 27 Dec 2025 12:42:34 GMT",
+    "server": "Apache-Coyote/1.1"
+  }
+}

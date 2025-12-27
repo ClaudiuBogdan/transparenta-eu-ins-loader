@@ -34,7 +34,7 @@ app.get("/api/contexts", async () => {
 
 app.get<{ Params: { id: string } }>("/api/contexts/:id", async (request) => {
   const { id } = request.params;
-  const context = await fetchContext(parseInt(id, 10));
+  const context = await fetchContext(id);
   return { data: context };
 });
 

@@ -3,7 +3,7 @@ import "dotenv/config";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import pino, { type DestinationStream, type LoggerOptions } from "pino";
+import pinoLib, { type DestinationStream, type LoggerOptions } from "pino";
 
 const LOG_LEVEL = process.env.LOG_LEVEL ?? "info";
 const LOG_FILE = process.env.LOG_FILE;
@@ -21,18 +21,18 @@ function createDestination(): DestinationStream | undefined {
   }
 
   // Create streams for both stdout and file
-  const streams: pino.StreamEntry[] = [
-    { level: LOG_LEVEL as pino.Level, stream: process.stdout },
+  const streams: pinoLib.StreamEntry[] = [
+    { level: LOG_LEVEL as pinoLib.Level, stream: process.stdout },
     {
-      level: LOG_LEVEL as pino.Level,
-      stream: pino.destination({
+      level: LOG_LEVEL as pinoLib.Level,
+      stream: pinoLib.destination({
         dest: LOG_FILE,
         sync: false,
       }),
     },
   ];
 
-  return pino.multistream(streams) as DestinationStream;
+  return pinoLib.multistream(streams) as DestinationStream;
 }
 
 const destination = createDestination();
@@ -45,8 +45,8 @@ export const loggerOptions: LoggerOptions = {
 // Create the main logger
 export const logger =
   destination !== undefined
-    ? pino(loggerOptions, destination)
-    : pino(loggerOptions);
+    ? pinoLib(loggerOptions, destination)
+    : pinoLib(loggerOptions);
 
 // For Fastify: export config that Fastify can use directly
 export const fastifyLoggerConfig =

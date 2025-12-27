@@ -1,7 +1,7 @@
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 
-import { serverLogger } from "../logger.js";
+import { fastifyLoggerConfig } from "../logger.js";
 import {
   fetchContexts,
   fetchContext,
@@ -13,7 +13,7 @@ const PORT = parseInt(process.env.PORT ?? "3000", 10);
 const HOST = process.env.HOST ?? "0.0.0.0";
 
 const app = Fastify({
-  logger: serverLogger,
+  logger: fastifyLoggerConfig,
 });
 
 await app.register(cors, {
@@ -107,8 +107,8 @@ app.get("/api/siruta", async (_request, reply) => {
 // Start server
 try {
   await app.listen({ port: PORT, host: HOST });
-  serverLogger.info({ host: HOST, port: PORT }, "Server started");
+  app.log.info({ host: HOST, port: PORT }, "Server started");
 } catch (err) {
-  serverLogger.error(err, "Failed to start server");
+  app.log.error(err, "Failed to start server");
   process.exit(1);
 }

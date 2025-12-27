@@ -61,7 +61,7 @@ export async function fetchContexts(): Promise<InsContext[]> {
 
   const data = (await response.json()) as InsContext[];
   apiLogger.debug(
-    { contextCount: data.length },
+    { contextCount: data.length, data },
     "Successfully fetched contexts"
   );
 
@@ -96,7 +96,7 @@ export async function fetchContext(id: number): Promise<InsContext> {
   }
 
   const data = (await response.json()) as InsContext;
-  apiLogger.debug({ context: data }, "Successfully fetched context");
+  apiLogger.debug({ contextId: id, data }, "Successfully fetched context");
 
   return data;
 }
@@ -121,7 +121,7 @@ export async function fetchMatricesList(): Promise<
 
   const data = (await response.json()) as { code: string; name: string }[];
   apiLogger.debug(
-    { matrixCount: data.length },
+    { matrixCount: data.length, data },
     "Successfully fetched matrices list"
   );
 
@@ -150,17 +150,7 @@ export async function fetchMatrix(code: string): Promise<InsMatrix> {
 
   const data = (await response.json()) as InsMatrix;
   apiLogger.debug(
-    {
-      matrixCode: code,
-      matrixName: data.matrixName,
-      description: data.matrixDescription,
-      startYear: data.startYear,
-      endYear: data.endYear,
-      lastUpdate: data.lastUpdate,
-      dimensionCount: data.dimensions.length,
-      hasCountyData: data.matrixDetails.nomJud,
-      hasUatData: data.matrixDetails.nomLoc,
-    },
+    { matrixCode: code, data },
     "Successfully fetched matrix metadata"
   );
 

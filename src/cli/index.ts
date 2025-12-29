@@ -9,20 +9,24 @@
 import { Command } from "commander";
 
 import { registerContextsCommand } from "./commands/contexts.js";
+import { registerDbCommand } from "./commands/db.js";
 import { registerDimensionsCommand } from "./commands/dimensions.js";
 import { registerExploreCommand } from "./commands/explore.js";
 import { registerMatricesCommand } from "./commands/matrices.js";
 import { registerMatrixCommand } from "./commands/matrix.js";
 import { registerQueryCommand } from "./commands/query.js";
+import { registerSyncCommand } from "./commands/sync.js";
 
 const program = new Command();
 
 program
   .name("ins-cli")
   .description("CLI for exploring INS Tempo statistical datasets")
-  .version("0.2.0");
+  .version("0.3.0");
 
 // Register all commands
+registerDbCommand(program);
+registerSyncCommand(program);
 registerExploreCommand(program);
 registerContextsCommand(program);
 registerMatricesCommand(program);

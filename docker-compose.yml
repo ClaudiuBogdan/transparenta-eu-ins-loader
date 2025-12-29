@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ins_tempo_db
+    environment:
+      POSTGRES_USER: ins_tempo
+      POSTGRES_PASSWORD: ins_tempo
+      POSTGRES_DB: ins_tempo
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ins_tempo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

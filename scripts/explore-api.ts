@@ -624,6 +624,7 @@ async function main() {
     const successfulMatrix = report.endpoints.matrices.find(
       (m) =>
         m.data !== undefined &&
+        m.data !== null &&
         typeof m.data === "object" &&
         "matrixName" in m.data
     );

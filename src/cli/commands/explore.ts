@@ -78,7 +78,6 @@ async function exploreByHierarchy(): Promise<void> {
 
   let currentContext: InsContext | null = null;
 
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- Intentional infinite loop for interactive navigation
   while (true) {
     let choices;
 
@@ -268,7 +267,6 @@ async function exploreMatrix(code: string): Promise<void> {
 
   displayMatrixDetails(matrix, code);
 
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- Intentional infinite loop for menu navigation
   while (true) {
     const action = await select({
       message: "What would you like to do?",

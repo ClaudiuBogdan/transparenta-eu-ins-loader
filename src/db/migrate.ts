@@ -1,111 +1,131 @@
-import { sql } from "kysely";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { db } from "./index.js";
+import { logger } from "../logger.js";
+import { closeConnection, pool } from "./connection.js";
 
-async function migrate() {
-  console.log("Running migrations...");
+const currentFilePath = fileURLToPath(import.meta.url);
+const currentDirPath = dirname(currentFilePath);
 
-  // Create ins_contexts table
-  await db.schema
-    .createTable("ins_contexts")
-    .ifNotExists()
-    .addColumn("id", "integer", (col) => col.primaryKey())
-    .addColumn("code", "text", (col) => col.notNull())
-    .addColumn("name", "text", (col) => col.notNull())
-    .addColumn("level", "integer", (col) => col.notNull())
-    .addColumn("parent_code", "text")
-    .execute();
+// ============================================================================
+// Migration Functions
+// ============================================================================
 
-  // Create ins_matrices table
-  await db.schema
-    .createTable("ins_matrices")
-    .ifNotExists()
-    .addColumn("code", "text", (col) => col.primaryKey())
-    .addColumn("name", "text", (col) => col.notNull())
-    .addColumn("description", "text")
-    .addColumn("context_id", "integer", (col) =>
-      col.references("ins_contexts.id")
-    )
-    .addColumn("start_year", "integer")
-    .addColumn("end_year", "integer")
-    .addColumn("last_update", "text")
-    .addColumn("has_county_data", "integer", (col) => col.defaultTo(0))
-    .addColumn("has_uat_data", "integer", (col) => col.defaultTo(0))
-    .execute();
+/**
+ * Run the PostgreSQL schema migration from postgres-schema.sql
+ */
+export async function runMigration(options?: {
+  fresh?: boolean;
+}): Promise<void> {
+  const client = await pool.connect();
 
-  // Create ins_dimensions table
-  await db.schema
-    .createTable("ins_dimensions")
-    .ifNotExists()
-    .addColumn("id", "integer", (col) => col.primaryKey().autoIncrement())
-    .addColumn("matrix_code", "text", (col) =>
-      col.notNull().references("ins_matrices.code")
-    )
-    .addColumn("dimension_id", "integer", (col) => col.notNull())
-    .addColumn("dimension_name", "text", (col) => col.notNull())
-    .addColumn("is_territorial", "integer", (col) => col.defaultTo(0))
-    .addColumn("is_temporal", "integer", (col) => col.defaultTo(0))
-    .execute();
+  try {
+    if (options?.fresh === true) {
+      logger.info("Dropping existing schema (--fresh mode)...");
+      await client.query("DROP SCHEMA public CASCADE");
+      await client.query("CREATE SCHEMA public");
+      logger.info("Schema dropped and recreated");
+    }
 
-  // Create ins_dimension_options table
-  await db.schema
-    .createTable("ins_dimension_options")
-    .ifNotExists()
-    .addColumn("id", "integer", (col) => col.primaryKey().autoIncrement())
-    .addColumn("dimension_id", "integer", (col) =>
-      col.notNull().references("ins_dimensions.id")
-    )
-    .addColumn("nom_item_id", "integer", (col) => col.notNull())
-    .addColumn("label", "text", (col) => col.notNull())
-    .addColumn("offset", "integer", (col) => col.notNull())
-    .addColumn("parent_nom_item_id", "integer")
-    .execute();
+    // Read the schema file
+    const schemaPath = join(currentDirPath, "postgres-schema.sql");
+    const schema = readFileSync(schemaPath, "utf8");
 
-  // Create ins_statistics table
-  await db.schema
-    .createTable("ins_statistics")
-    .ifNotExists()
-    .addColumn("id", "integer", (col) => col.primaryKey().autoIncrement())
-    .addColumn("matrix_code", "text", (col) =>
-      col.notNull().references("ins_matrices.code")
-    )
-    .addColumn("siruta_code", "text")
-    .addColumn("period_year", "integer")
-    .addColumn("period_quarter", "integer")
-    .addColumn("period_month", "integer")
-    .addColumn("indicator_value", "real")
-    .addColumn("dimension_values", "text")
-    .execute();
+    logger.info("Running PostgreSQL schema migration...");
 
-  // Create siruta table
-  await db.schema
-    .createTable("siruta")
-    .ifNotExists()
-    .addColumn("siruta", "text", (col) => col.primaryKey())
-    .addColumn("denloc", "text", (col) => col.notNull())
-    .addColumn("jud", "integer", (col) => col.notNull())
-    .addColumn("sirsup", "text")
-    .addColumn("tip", "integer", (col) => col.notNull())
-    .addColumn("niv", "integer", (col) => col.notNull())
-    .addColumn("med", "integer", (col) => col.notNull())
-    .execute();
+    await client.query("BEGIN");
+    await client.query(schema);
+    await client.query("COMMIT");
 
-  // Create indexes
-  await sql`CREATE INDEX IF NOT EXISTS idx_stats_siruta ON ins_statistics(siruta_code)`.execute(
-    db
-  );
-  await sql`CREATE INDEX IF NOT EXISTS idx_stats_period ON ins_statistics(period_year, matrix_code)`.execute(
-    db
-  );
-  await sql`CREATE INDEX IF NOT EXISTS idx_siruta_jud ON siruta(jud)`.execute(
-    db
-  );
-
-  console.log("Migrations completed successfully!");
-  await db.destroy();
+    logger.info("Schema migration completed successfully");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    logger.error({ error }, "Schema migration failed");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
-migrate().catch((err: unknown) => {
-  console.error("Migration failed:", err);
-  process.exit(1);
-});
+/**
+ * Check if the schema exists (has tables)
+ */
+export async function hasSchema(): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    const result = await client.query<{ count: number }>(`
+      SELECT COUNT(*)::int as count
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      AND table_type = 'BASE TABLE'
+    `);
+    const row = result.rows[0];
+    return row !== undefined && row.count > 0;
+  } finally {
+    client.release();
+  }
+}
+
+interface TableStat {
+  table_name: string;
+  row_count: number;
+}
+
+/**
+ * Get table statistics
+ */
+export async function getTableStats(): Promise<TableStat[]> {
+  const client = await pool.connect();
+  try {
+    const result = await client.query<TableStat>(`
+      SELECT
+        relname as table_name,
+        n_live_tup::bigint as row_count
+      FROM pg_stat_user_tables
+      WHERE schemaname = 'public'
+      ORDER BY relname
+    `);
+    return result.rows;
+  } finally {
+    client.release();
+  }
+}
+
+// ============================================================================
+// CLI Entry Point (only runs when executed directly, not when imported)
+// ============================================================================
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const fresh = args.includes("--fresh");
+
+  if (fresh) {
+    console.log("Running migration with --fresh flag (will drop all tables)");
+  }
+
+  try {
+    await runMigration({ fresh });
+    console.log("Migration completed successfully!");
+
+    // Show table stats
+    const stats = await getTableStats();
+    if (stats.length > 0) {
+      console.log("\nTable statistics:");
+      for (const row of stats) {
+        console.log(`  ${row.table_name}: ${String(row.row_count)} rows`);
+      }
+    }
+  } catch (error) {
+    console.error("Migration failed:", error);
+    process.exitCode = 1;
+  } finally {
+    await closeConnection();
+  }
+}
+
+// Only run main() if this file is executed directly (not imported)
+const isMainModule = process.argv[1]?.includes("migrate");
+if (isMainModule) {
+  void main();
+}

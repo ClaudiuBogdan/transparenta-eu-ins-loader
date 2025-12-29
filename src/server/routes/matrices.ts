@@ -17,6 +17,8 @@ import {
   PeriodicitySchema,
   MatrixStatusSchema,
   SortOrderSchema,
+  LocaleSchema,
+  type Locale,
 } from "../schemas/common.js";
 import { MatrixListResponseSchema } from "../schemas/responses.js";
 
@@ -58,6 +60,7 @@ function parsePgArray(value: unknown): string[] {
 const ListMatricesQuerySchema = Type.Intersect([
   PaginationQuerySchema,
   Type.Object({
+    locale: Type.Optional(LocaleSchema),
     q: Type.Optional(
       Type.String({ description: "Search query for matrix name" })
     ),
@@ -119,6 +122,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
     },
     async (request) => {
       const {
+        locale = "ro",
         q,
         contextId,
         contextPath,
@@ -142,6 +146,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "matrices.id",
           "matrices.ins_code",
           "matrices.name",
+          "matrices.name_en",
           "matrices.periodicity",
           "matrices.has_uat_data",
           "matrices.has_county_data",
@@ -156,7 +161,20 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
 
       // Apply filters
       if (q) {
-        query = query.where("matrices.name", "ilike", `%${q}%`);
+        // Search in the appropriate language, fallback to RO if EN not available
+        if (locale === "en") {
+          query = query.where((eb) =>
+            eb.or([
+              eb("matrices.name_en", "ilike", `%${q}%`),
+              eb.and([
+                eb("matrices.name_en", "is", null),
+                eb("matrices.name", "ilike", `%${q}%`),
+              ]),
+            ])
+          );
+        } else {
+          query = query.where("matrices.name", "ilike", `%${q}%`);
+        }
       }
 
       if (contextId) {
@@ -212,7 +230,8 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
       const items: MatrixSummaryDto[] = rows.slice(0, limit).map((m) => ({
         id: m.id,
         insCode: m.ins_code,
-        name: m.name,
+        // Use locale-appropriate name, fallback to RO if EN not available
+        name: locale === "en" && m.name_en ? m.name_en : m.name,
         contextPath: m.context_path,
         contextName: m.context_name,
         periodicity: parsePgArray(m.periodicity),
@@ -243,7 +262,10 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
    * GET /api/v1/matrices/:code
    * Get matrix details with dimensions
    */
-  app.get<{ Params: Static<typeof CodeParamSchema> }>(
+  app.get<{
+    Params: Static<typeof CodeParamSchema>;
+    Querystring: { locale?: Locale };
+  }>(
     "/matrices/:code",
     {
       schema: {
@@ -253,11 +275,15 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "Example: `/matrices/POP105A` returns population by sex, age groups, and environment.",
         tags: ["Matrices"],
         params: CodeParamSchema,
+        querystring: Type.Object({
+          locale: Type.Optional(LocaleSchema),
+        }),
         // Response schema disabled - complex nested objects cause serialization issues
       },
     },
     async (request) => {
       const { code } = request.params;
+      const locale = request.query.locale ?? "ro";
 
       // Get matrix
       const matrix = await db
@@ -267,6 +293,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "matrices.id",
           "matrices.ins_code",
           "matrices.name",
+          "matrices.name_en",
           "matrices.periodicity",
           "matrices.has_uat_data",
           "matrices.has_county_data",
@@ -338,7 +365,8 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
       const matrixDetail: MatrixDetailDto = {
         id: matrix.id,
         insCode: matrix.ins_code,
-        name: matrix.name,
+        // Use locale-appropriate name, fallback to RO if EN not available
+        name: locale === "en" && matrix.name_en ? matrix.name_en : matrix.name,
         contextPath: matrix.context_path,
         contextName: matrix.context_name,
         periodicity: parsePgArray(matrix.periodicity),

@@ -10,6 +10,11 @@ import type {
 const BASE_URL = "http://statistici.insse.ro:8077/tempo-ins";
 const RATE_LIMIT_MS = 750; // 0.75 seconds between requests
 
+/**
+ * Supported locales for INS API
+ */
+export type Locale = "ro" | "en";
+
 let lastRequestTime = 0;
 
 async function rateLimitedFetch(
@@ -106,15 +111,18 @@ export async function fetchContext(code: string): Promise<InsContext[]> {
 
 /**
  * Fetch all available matrices
+ * @param lang - Language for matrix names ('ro' or 'en'), defaults to 'ro'
  */
-export async function fetchMatricesList(): Promise<InsMatrixListItem[]> {
-  const url = `${BASE_URL}/matrix/matrices?lang=ro`;
-  apiLogger.info({ url }, "Fetching all matrices list");
+export async function fetchMatricesList(
+  lang: Locale = "ro"
+): Promise<InsMatrixListItem[]> {
+  const url = `${BASE_URL}/matrix/matrices?lang=${lang}`;
+  apiLogger.info({ url, lang }, "Fetching all matrices list");
 
   const response = await rateLimitedFetch(url);
   if (!response.ok) {
     apiLogger.error(
-      { status: response.status, statusText: response.statusText },
+      { status: response.status, statusText: response.statusText, lang },
       "Failed to fetch matrices list"
     );
     throw new Error(`Failed to fetch matrices: ${response.statusText}`);
@@ -122,11 +130,34 @@ export async function fetchMatricesList(): Promise<InsMatrixListItem[]> {
 
   const data = (await response.json()) as InsMatrixListItem[];
   apiLogger.debug(
-    { matrixCount: data.length, data },
+    { matrixCount: data.length, lang },
     "Successfully fetched matrices list"
   );
 
   return data;
+}
+
+/**
+ * Fetch matrices list in both RO and EN languages in parallel
+ * @returns Object with Romanian and English matrix lists
+ */
+export async function fetchMatricesListBilingual(): Promise<{
+  ro: InsMatrixListItem[];
+  en: InsMatrixListItem[];
+}> {
+  apiLogger.info("Fetching matrices list in both RO and EN languages");
+
+  const [ro, en] = await Promise.all([
+    fetchMatricesList("ro"),
+    fetchMatricesList("en"),
+  ]);
+
+  apiLogger.debug(
+    { roCount: ro.length, enCount: en.length },
+    "Successfully fetched bilingual matrices list"
+  );
+
+  return { ro, en };
 }
 
 /**

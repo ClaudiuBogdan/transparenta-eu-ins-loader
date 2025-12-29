@@ -1,6 +1,23 @@
 /**
  * Statistics Routes - /api/v1/statistics
- * Main data query endpoint with time series format
+ *
+ * Main data query endpoint with time series format.
+ *
+ * ## Default Behavior
+ *
+ * By default, the API filters classification dimensions to "TOTAL" values only
+ * to prevent duplicate/redundant data from sub-categories. For example, if a
+ * matrix has a SEX dimension with values [TOTAL, M, F], only TOTAL is returned
+ * by default to avoid double-counting.
+ *
+ * Use `includeAll=true` to disable this behavior and get all classification values.
+ *
+ * ## Response Format
+ *
+ * Returns time series data with data points containing:
+ * - x: Period label (e.g., "Anul 2020", "Luna ianuarie 2020")
+ * - y: Statistical value (number or null)
+ * - timePeriod: Parsed time period metadata
  */
 
 import { Type, type Static } from "@sinclair/typebox";
@@ -62,7 +79,7 @@ const StatisticsQuerySchema = Type.Intersect([
     ),
     territoryCode: Type.Optional(
       Type.String({
-        description: "Filter by territory code (e.g., 'RO', 'BH')",
+        description: "Filter by territory code (e.g., 'RO', 'BH', 'SB')",
       })
     ),
     territoryPath: Type.Optional(
@@ -83,7 +100,21 @@ const StatisticsQuerySchema = Type.Intersect([
     classificationFilters: Type.Optional(
       Type.String({
         description:
-          'JSON object mapping classification type codes to arrays of value codes. Example: {"SEX":["M","F"]}',
+          "JSON object mapping classification type codes to arrays of value codes. " +
+          'Use "*" as a wildcard to filter all dimensions. ' +
+          'Examples: {"SEX":["M","F"]}, {"*":["TOTAL"]}. ' +
+          'Default: {"*":["TOTAL"]} - only TOTAL values are returned.',
+      })
+    ),
+
+    // Include all data (disable default TOTAL filters)
+    includeAll: Type.Optional(
+      Type.Boolean({
+        description:
+          "When true, disables the default TOTAL filter for classification dimensions. " +
+          "By default (false), only TOTAL values are returned for each classification " +
+          "dimension to avoid duplicate data from sub-categories.",
+        default: false,
       })
     ),
 
@@ -126,13 +157,19 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
     "/statistics/:matrixCode",
     {
       schema: {
-        summary: "Query statistics",
+        summary: "Query statistics as time series",
         description:
-          "Query statistical data from a matrix and get results as time series. " +
-          "Examples:\n" +
-          "- `/statistics/POP105A?territoryCode=RO&yearFrom=2020` - Romania population from 2020\n" +
-          "- `/statistics/POP105A?territoryLevel=NUTS3&groupBy=territory` - By county\n" +
-          '- `/statistics/POP105A?classificationFilters={"SEX":["M"]}` - Male population only',
+          "Query statistical data from a matrix and get results as time series.\n\n" +
+          "## Default TOTAL Filtering\n\n" +
+          "By default, classification dimensions are filtered to TOTAL values only to prevent " +
+          "duplicate data from sub-categories. For example, if a matrix has SEX=[TOTAL, M, F], " +
+          "only TOTAL is returned by default.\n\n" +
+          "To get all classification values (including sub-categories), use `includeAll=true`.\n\n" +
+          "## Examples\n\n" +
+          "- `GET /statistics/POP105A?territoryCode=RO&yearFrom=2020` - Romania population from 2020\n" +
+          "- `GET /statistics/POP105A?territoryLevel=NUTS3&groupBy=territory` - By county\n" +
+          '- `GET /statistics/POP105A?classificationFilters={"SEX":["M"]}` - Male population only\n' +
+          "- `GET /statistics/POP105A?includeAll=true` - Include all classification breakdowns",
         tags: ["Statistics"],
         params: MatrixCodeParamSchema,
         querystring: StatisticsQuerySchema,
@@ -150,6 +187,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
         yearTo,
         periodicity,
         classificationFilters: classFiltersJson,
+        includeAll = false,
         groupBy = "none",
         limit: rawLimit,
         cursor,
@@ -263,7 +301,43 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
         }
       }
 
-      // If we have classification filters, join the statistic_classifications table
+      // Apply default TOTAL filter if no explicit filters provided (unless includeAll=true)
+      if (!includeAll && Object.keys(classFilters).length === 0) {
+        classFilters["*"] = ["TOTAL"];
+      }
+
+      // Handle wildcard "*" - applies to all classification values
+      const wildcardFilter = classFilters["*"];
+      if (wildcardFilter && wildcardFilter.length > 0) {
+        // Get IDs of classification values matching the wildcard codes
+        const allowedValueIds = await db
+          .selectFrom("classification_values")
+          .select("id")
+          .where("code", "in", wildcardFilter)
+          .execute();
+
+        if (allowedValueIds.length > 0) {
+          const allowedIds = allowedValueIds.map((v) => v.id);
+          // Filter statistics to only those where ALL classifications are in allowed list
+          // Use NOT EXISTS for better performance
+          // eslint-disable-next-line @typescript-eslint/unbound-method -- Kysely expression builder methods are safe
+          query = query.where(({ eb, selectFrom, ref }) =>
+            eb.not(
+              eb.exists(
+                selectFrom("statistic_classifications as sc")
+                  .select("sc.statistic_id")
+                  .where("sc.statistic_id", "=", ref("statistics.id"))
+                  .where("sc.matrix_id", "=", matrix.id)
+                  .where("sc.classification_value_id", "not in", allowedIds)
+              )
+            )
+          );
+        }
+        // Remove wildcard from entries to process
+        delete classFilters["*"];
+      }
+
+      // If we have specific classification filters, apply them
       const classFilterEntries = Object.entries(classFilters);
       if (classFilterEntries.length > 0) {
         // Get classification value IDs for the filters
@@ -595,6 +669,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
               yearTo,
               periodicity,
               classificationFilters: classFilters,
+              includeAll,
               groupBy,
             },
           },

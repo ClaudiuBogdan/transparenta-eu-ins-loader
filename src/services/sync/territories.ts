@@ -254,9 +254,14 @@ export class TerritoryService {
       }
     }
 
-    // Check for region (by name match)
+    // Check for region (by normalized name match)
+    // Normalize: remove spaces around hyphens, lowercase
+    const normalizedLabel = trimmed.toLowerCase().replaceAll(/\s*-\s*/g, "-");
     for (const region of REGIONS) {
-      if (trimmed.toLowerCase().includes(region.name.toLowerCase())) {
+      const normalizedRegionName = region.name
+        .toLowerCase()
+        .replaceAll(/\s*-\s*/g, "-");
+      if (normalizedLabel.includes(normalizedRegionName)) {
         const reg = await this.db
           .selectFrom("territories")
           .select("id")
@@ -266,11 +271,15 @@ export class TerritoryService {
       }
     }
 
-    // Check for county (by name match)
+    // Check for county (by name match, including "Municipiul" prefix)
     for (const county of COUNTIES) {
+      const lowerTrimmed = trimmed.toLowerCase();
+      const lowerCounty = county.name.toLowerCase();
       if (
-        trimmed.toLowerCase() === county.name.toLowerCase() ||
-        trimmed.toLowerCase().startsWith(county.name.toLowerCase() + " ")
+        lowerTrimmed === lowerCounty ||
+        lowerTrimmed.startsWith(lowerCounty + " ") ||
+        lowerTrimmed === "municipiul " + lowerCounty ||
+        lowerTrimmed.includes(lowerCounty)
       ) {
         const cty = await this.db
           .selectFrom("territories")

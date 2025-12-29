@@ -103,6 +103,16 @@ export const SortOrderSchema = Type.Union([
   Type.Literal("desc"),
 ]);
 
+export const LocaleSchema = Type.Union(
+  [Type.Literal("ro"), Type.Literal("en")],
+  {
+    default: "ro",
+    description: "Language for translatable fields (ro=Romanian, en=English)",
+  }
+);
+
+export type Locale = Static<typeof LocaleSchema>;
+
 // ============================================================================
 // ID Parameter Schemas
 // ============================================================================

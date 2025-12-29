@@ -288,6 +288,7 @@ CREATE TABLE matrices (
     -- INS API fields
     ins_code VARCHAR(20) NOT NULL,
     name TEXT NOT NULL,
+    name_en TEXT,  -- English translation from INS API
 
     -- Hierarchy
     context_id INTEGER REFERENCES contexts(id) ON DELETE SET NULL,
@@ -533,8 +534,13 @@ CREATE TABLE statistics (
     source_enc_query TEXT,
     scraped_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
+    -- Idempotency support
+    natural_key_hash VARCHAR(64),
+    version INTEGER NOT NULL DEFAULT 1,
+
     -- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     -- Primary key includes partition key
     PRIMARY KEY (matrix_id, id)
@@ -544,6 +550,9 @@ COMMENT ON TABLE statistics IS 'Partitioned fact table storing statistical value
 COMMENT ON COLUMN statistics.value IS 'The numeric data value, NULL for missing/unavailable data';
 COMMENT ON COLUMN statistics.value_status IS 'Special value markers: ":" (unavailable), "-" (none), "*" (confidential), "<0.5"';
 COMMENT ON COLUMN statistics.source_enc_query IS 'Original INS encQuery for traceability and re-scraping';
+COMMENT ON COLUMN statistics.natural_key_hash IS 'SHA-256 hash of natural key (matrix_id, territory_id, time_period_id, unit_id, classification_ids) for idempotent upserts';
+COMMENT ON COLUMN statistics.version IS 'Row version, incremented on each update';
+COMMENT ON COLUMN statistics.updated_at IS 'Timestamp of last update';
 
 -- Note: Indexes are created on partitions automatically when using CREATE INDEX on parent
 -- These will be inherited by all partitions
@@ -552,6 +561,7 @@ CREATE INDEX idx_statistics_time ON statistics(time_period_id);
 CREATE INDEX idx_statistics_unit ON statistics(unit_of_measure_id) WHERE unit_of_measure_id IS NOT NULL;
 CREATE INDEX idx_statistics_star ON statistics(matrix_id, territory_id, time_period_id);
 CREATE INDEX idx_statistics_scraped ON statistics(scraped_at);
+-- Note: unique index on natural_key_hash is created per partition in create_statistics_partition()
 
 -- Default partition for any matrix_id not yet assigned a specific partition
 CREATE TABLE statistics_default PARTITION OF statistics DEFAULT;
@@ -560,11 +570,15 @@ CREATE TABLE statistics_default PARTITION OF statistics DEFAULT;
 -- Function: Create partition for a specific matrix
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION create_statistics_partition(p_matrix_id INTEGER)
-RETURNS VOID AS $$
+RETURNS TEXT AS $$
 DECLARE
     v_partition_name TEXT;
+    v_index_name TEXT;
+    v_hash_index_name TEXT;
 BEGIN
     v_partition_name := 'statistics_matrix_' || p_matrix_id;
+    v_index_name := 'idx_' || v_partition_name || '_time_territory';
+    v_hash_index_name := 'idx_' || v_partition_name || '_natural_key';
 
     -- Check if partition already exists
     IF NOT EXISTS (
@@ -572,6 +586,7 @@ BEGIN
         WHERE tablename = v_partition_name
         AND schemaname = 'public'
     ) THEN
+        -- Create the partition
         EXECUTE format(
             'CREATE TABLE %I PARTITION OF statistics FOR VALUES IN (%s)',
             v_partition_name,
@@ -599,11 +614,41 @@ BEGIN
             v_partition_name,
             v_partition_name || '_unit_fk'
         );
+
+        -- Create composite index for common queries
+        EXECUTE format(
+            'CREATE INDEX %I ON %I (time_period_id, territory_id)',
+            v_index_name,
+            v_partition_name
+        );
+
+        -- Create unique index on natural_key_hash for upsert support
+        EXECUTE format(
+            'CREATE UNIQUE INDEX %I ON %I (natural_key_hash) WHERE natural_key_hash IS NOT NULL',
+            v_hash_index_name,
+            v_partition_name
+        );
+
+        RETURN 'Created partition ' || v_partition_name;
     END IF;
+
+    -- Partition exists, ensure hash index exists
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class WHERE relname = v_hash_index_name
+    ) THEN
+        EXECUTE format(
+            'CREATE UNIQUE INDEX %I ON %I (natural_key_hash) WHERE natural_key_hash IS NOT NULL',
+            v_hash_index_name,
+            v_partition_name
+        );
+        RETURN 'Added hash index to existing partition ' || v_partition_name;
+    END IF;
+
+    RETURN 'Partition ' || v_partition_name || ' already exists';
 END;
 $$ LANGUAGE plpgsql;
 
-COMMENT ON FUNCTION create_statistics_partition IS 'Creates a dedicated partition for a matrix. Call before inserting data for a new matrix.';
+COMMENT ON FUNCTION create_statistics_partition IS 'Creates a dedicated partition for a matrix with indexes for queries and upsert support.';
 
 -- ----------------------------------------------------------------------------
 -- statistic_classifications: Junction table for classification dimensions (PARTITIONED)
@@ -744,9 +789,72 @@ COMMENT ON TABLE scrape_chunks IS 'Individual chunks for queries exceeding the 3
 CREATE INDEX idx_scrape_chunks_job ON scrape_chunks(job_id);
 CREATE INDEX idx_scrape_chunks_status ON scrape_chunks(status);
 
+-- ----------------------------------------------------------------------------
+-- data_sync_checkpoints: Track sync progress per chunk for incremental sync
+-- ----------------------------------------------------------------------------
+CREATE TABLE data_sync_checkpoints (
+    id SERIAL PRIMARY KEY,
+
+    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
+
+    -- Store hash of enc_query for unique constraint (B-tree has 8KB limit)
+    -- The full enc_query can exceed this limit for matrices with many localities
+    chunk_enc_query_hash VARCHAR(64) NOT NULL,
+
+    -- Store the full enc_query for reference/debugging
+    chunk_enc_query TEXT NOT NULL,
+
+    -- Sync tracking
+    last_scraped_at TIMESTAMPTZ NOT NULL,
+    row_count INTEGER DEFAULT 0,
+
+    -- Timestamps
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    -- Constraints: Use hash for unique constraint to avoid B-tree size limit
+    CONSTRAINT uq_sync_checkpoints UNIQUE (matrix_id, chunk_enc_query_hash)
+);
+
+COMMENT ON TABLE data_sync_checkpoints IS 'Tracks sync progress per chunk (enc_query) for incremental sync support';
+COMMENT ON COLUMN data_sync_checkpoints.chunk_enc_query IS 'The encQuery string for this chunk';
+COMMENT ON COLUMN data_sync_checkpoints.last_scraped_at IS 'When this chunk was last successfully synced';
+COMMENT ON COLUMN data_sync_checkpoints.row_count IS 'Number of rows synced in this chunk';
+
+CREATE INDEX idx_sync_checkpoints_matrix ON data_sync_checkpoints(matrix_id);
+
 -- ============================================================================
--- SECTION 7: FUNCTIONS FOR PATH COMPUTATION
+-- SECTION 7: FUNCTIONS FOR NATURAL KEY HASH AND PATH COMPUTATION
 -- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- Function: Compute natural key hash for statistics
+-- ----------------------------------------------------------------------------
+-- Used for idempotent upserts. The hash uniquely identifies a data point
+-- based on its natural key: matrix + territory + time + unit + classifications
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION compute_statistic_natural_key(
+    p_matrix_id INTEGER,
+    p_territory_id INTEGER,
+    p_time_period_id INTEGER,
+    p_unit_of_measure_id INTEGER,
+    p_classification_ids INTEGER[]
+) RETURNS VARCHAR(64) AS $$
+DECLARE
+    v_key TEXT;
+BEGIN
+    -- Build deterministic key: matrix:territory:time:unit:sorted_classifications
+    v_key := p_matrix_id::TEXT || ':' ||
+             COALESCE(p_territory_id::TEXT, 'N') || ':' ||
+             p_time_period_id::TEXT || ':' ||
+             COALESCE(p_unit_of_measure_id::TEXT, 'N') || ':' ||
+             COALESCE(array_to_string(ARRAY(SELECT unnest(p_classification_ids) ORDER BY 1), ','), '');
+
+    RETURN encode(sha256(v_key::bytea), 'hex');
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+COMMENT ON FUNCTION compute_statistic_natural_key IS 'Computes a SHA-256 hash of the natural key for a statistic row. Used for deduplication and upsert operations.';
 
 -- ----------------------------------------------------------------------------
 -- Function: Compute context path from parent chain

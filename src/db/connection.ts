@@ -55,8 +55,8 @@ export async function checkConnection(): Promise<boolean> {
  */
 export async function closeConnection(): Promise<void> {
   try {
+    // db.destroy() already closes the pool, so we only need to call it once
     await db.destroy();
-    await pool.end();
     logger.info("Database connection closed");
   } catch (error) {
     logger.error({ error }, "Error closing database connection");

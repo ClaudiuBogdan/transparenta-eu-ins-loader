@@ -137,10 +137,21 @@ export function registerSyncCommand(program: Command): void {
     .option("--years <range>", "Year range, e.g., 2020-2024")
     .option("--resume", "Resume from last incomplete job")
     .option("--limit <number>", "Limit number of rows to sync (for testing)")
+    .option("--force-refresh", "Force re-fetch even if data exists")
+    .option(
+      "--incremental",
+      "Only sync chunks that have changed (uses checkpoints)"
+    )
     .action(
       async (
         matrixCode: string,
-        options: { years?: string; resume?: boolean; limit?: string }
+        options: {
+          years?: string;
+          resume?: boolean;
+          limit?: string;
+          forceRefresh?: boolean;
+          incremental?: boolean;
+        }
       ) => {
         const spinner = ora(`Syncing data for ${matrixCode}...`).start();
 
@@ -153,15 +164,25 @@ export function registerSyncCommand(program: Command): void {
             yearRange: options.years,
             resume: options.resume,
             limit,
+            forceRefresh: options.forceRefresh,
+            incremental: options.incremental,
           });
 
+          // Build result message showing inserted vs updated
+          const inserted = result.rowsInserted;
+          const updated = result.rowsUpdated;
+          const totalProcessed = inserted + updated;
+
+          let message: string;
           if (result.totalChunks !== undefined && result.totalChunks > 0) {
-            spinner.succeed(
-              `Data synced: ${String(result.rowsInserted)} rows (${String(result.chunksCompleted ?? 0)}/${String(result.totalChunks)} chunks)`
-            );
+            message =
+              `Data synced: ${String(inserted)} inserted, ${String(updated)} updated ` +
+              `(${String(result.chunksCompleted ?? 0)}/${String(result.totalChunks)} chunks)`;
           } else {
-            spinner.succeed(`Data synced: ${String(result.rowsInserted)} rows`);
+            message = `Data synced: ${String(inserted)} inserted, ${String(updated)} updated (${String(totalProcessed)} total)`;
           }
+
+          spinner.succeed(message);
         } catch (error) {
           spinner.fail(`Failed: ${(error as Error).message}`);
           process.exitCode = 1;

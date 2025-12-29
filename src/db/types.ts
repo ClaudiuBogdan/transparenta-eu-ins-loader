@@ -132,6 +132,7 @@ export interface MatricesTable {
   id: Generated<number>;
   ins_code: string;
   name: string;
+  name_en: string | null;
   context_id: number | null;
   periodicity: PeriodicityType[];
   definition: string | null;
@@ -247,6 +248,10 @@ export interface StatisticsTable {
   source_enc_query: string | null;
   scraped_at: Generated<Date>;
   created_at: Generated<Date>;
+  // Idempotency fields
+  natural_key_hash: string | null;
+  updated_at: Generated<Date>;
+  version: Generated<number>;
 }
 
 /**
@@ -299,6 +304,20 @@ export interface ScrapeChunksTable {
   created_at: Generated<Date>;
 }
 
+/**
+ * data_sync_checkpoints - Track sync progress per chunk for incremental sync
+ */
+export interface DataSyncCheckpointsTable {
+  id: Generated<number>;
+  matrix_id: number;
+  chunk_enc_query_hash: string; // SHA-256 hash for unique constraint (B-tree 8KB limit)
+  chunk_enc_query: string; // Full enc_query for reference
+  last_scraped_at: Date;
+  row_count: number;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
 // ============================================================================
 // Database Interface
 // ============================================================================
@@ -328,6 +347,9 @@ export interface Database {
   // Scraping infrastructure
   scrape_jobs: ScrapeJobsTable;
   scrape_chunks: ScrapeChunksTable;
+
+  // Data sync checkpoints
+  data_sync_checkpoints: DataSyncCheckpointsTable;
 }
 
 // ============================================================================
@@ -408,6 +430,11 @@ export type ScrapeJobUpdate = Updateable<ScrapeJobsTable>;
 export type ScrapeChunk = Selectable<ScrapeChunksTable>;
 export type NewScrapeChunk = Insertable<ScrapeChunksTable>;
 export type ScrapeChunkUpdate = Updateable<ScrapeChunksTable>;
+
+// Data Sync Checkpoints
+export type DataSyncCheckpoint = Selectable<DataSyncCheckpointsTable>;
+export type NewDataSyncCheckpoint = Insertable<DataSyncCheckpointsTable>;
+export type DataSyncCheckpointUpdate = Updateable<DataSyncCheckpointsTable>;
 
 // ============================================================================
 // Sync Result Types

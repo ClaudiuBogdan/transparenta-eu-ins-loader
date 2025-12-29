@@ -3,7 +3,10 @@ import { TerritoryService } from "./territories.js";
 import { TimePeriodService } from "./time-periods.js";
 import { UnitOfMeasureService } from "./units.js";
 import { logger } from "../../logger.js";
-import { fetchMatrix, fetchMatricesList } from "../../scraper/client.js";
+import {
+  fetchMatrix,
+  fetchMatricesListBilingual,
+} from "../../scraper/client.js";
 
 import type {
   Database,
@@ -79,18 +82,32 @@ export class MatrixSyncService {
 
   /**
    * Sync the matrix catalog (list only, no details)
+   * Fetches both Romanian and English names in parallel
    */
   async syncCatalog(): Promise<SyncResult> {
     const startTime = Date.now();
-    logger.info("Starting matrix catalog sync");
+    logger.info("Starting matrix catalog sync (bilingual)");
 
-    const matrices = await fetchMatricesList();
-    logger.info({ count: matrices.length }, "Fetched matrix list from API");
+    // Fetch both languages in parallel
+    const { ro: matricesRo, en: matricesEn } =
+      await fetchMatricesListBilingual();
+    logger.info(
+      { roCount: matricesRo.length, enCount: matricesEn.length },
+      "Fetched matrix lists from API (RO and EN)"
+    );
+
+    // Build EN name lookup map by code
+    const enNameMap = new Map<string, string>();
+    for (const m of matricesEn) {
+      enNameMap.set(m.code, m.name);
+    }
 
     let inserted = 0;
     let updated = 0;
 
-    for (const m of matrices) {
+    for (const m of matricesRo) {
+      const nameEn = enNameMap.get(m.code) ?? null;
+
       const existing = await this.db
         .selectFrom("matrices")
         .select("id")
@@ -100,7 +117,7 @@ export class MatrixSyncService {
       if (existing) {
         await this.db
           .updateTable("matrices")
-          .set({ name: m.name, updated_at: new Date() })
+          .set({ name: m.name, name_en: nameEn, updated_at: new Date() })
           .where("id", "=", existing.id)
           .execute();
         updated++;
@@ -108,6 +125,7 @@ export class MatrixSyncService {
         const newMatrix: NewMatrix = {
           ins_code: m.code,
           name: m.name,
+          name_en: nameEn,
           status: "ACTIVE",
           dimension_count: 0,
           has_county_data: false,
@@ -127,7 +145,7 @@ export class MatrixSyncService {
     const duration = Date.now() - startTime;
     logger.info(
       { inserted, updated, duration },
-      "Matrix catalog sync completed"
+      "Matrix catalog sync completed (bilingual)"
     );
 
     return { inserted, updated, duration };
@@ -329,7 +347,7 @@ export class MatrixSyncService {
       const newOption: NewMatrixDimensionOption = {
         matrix_dimension_id: dimId,
         nom_item_id: opt.nomItemId,
-        label: opt.label,
+        label: opt.label.trim(), // Normalize whitespace at storage
         offset_order: opt.offset,
         parent_nom_item_id: opt.parentId ?? null,
         territory_id: territoryId,

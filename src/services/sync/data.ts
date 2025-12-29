@@ -1,6 +1,12 @@
 import { sql, type Kysely } from "kysely";
 
+import { SyncCheckpointService } from "./checkpoints.js";
 import { MatrixSyncService } from "./matrices.js";
+import {
+  computeNaturalKeyHash,
+  upsertStatistic,
+  type StatisticWithHash,
+} from "./upsert.js";
 import { logger } from "../../logger.js";
 import {
   fetchMatrix,
@@ -16,7 +22,6 @@ import type {
   DataSyncResult,
   NewScrapeJob,
   NewScrapeChunk,
-  NewStatistic,
   ScrapeStatus,
 } from "../../db/types.js";
 import type { InsMatrix, InsDimension } from "../../types/index.js";
@@ -47,9 +52,11 @@ interface ParsedDataRow {
 
 export class DataSyncService {
   private matrixService: MatrixSyncService;
+  private checkpointService: SyncCheckpointService;
 
   constructor(private db: Kysely<Database>) {
     this.matrixService = new MatrixSyncService(db);
+    this.checkpointService = new SyncCheckpointService(db);
   }
 
   /**
@@ -61,6 +68,8 @@ export class DataSyncService {
       yearRange?: string;
       resume?: boolean;
       limit?: number;
+      forceRefresh?: boolean;
+      incremental?: boolean;
     }
   ): Promise<DataSyncResult> {
     logger.info({ matrixCode, options }, "Starting data sync");
@@ -164,19 +173,21 @@ export class DataSyncService {
     }
 
     let rowsInserted = 0;
+    let rowsUpdated = 0;
     for (const row of rowsToProcess) {
-      const inserted = await this.insertStatistic(
+      const result = await this.upsertStatisticRow(
         matrixId,
         matrix,
         row,
         encQuery
       );
-      if (inserted) rowsInserted++;
+      if (result.inserted) rowsInserted++;
+      if (result.updated) rowsUpdated++;
     }
 
-    await this.completeJob(jobId, rowsInserted);
+    await this.completeJob(jobId, rowsInserted + rowsUpdated);
 
-    return { rowsInserted, rowsUpdated: 0 };
+    return { rowsInserted, rowsUpdated };
   }
 
   /**
@@ -240,7 +251,8 @@ export class DataSyncService {
       );
     }
 
-    let totalRows = 0;
+    let totalInserted = 0;
+    let totalUpdated = 0;
     let completedChunks = 0;
 
     for (const chunk of chunksToProcess) {
@@ -261,20 +273,34 @@ export class DataSyncService {
         const rows = parsePivotResponse(csvData);
         const parsed = this.parseRows(rows, matrix);
 
-        let chunkRows = 0;
+        let chunkInserted = 0;
+        let chunkUpdated = 0;
         for (const row of parsed) {
-          const inserted = await this.insertStatistic(
+          const result = await this.upsertStatisticRow(
             matrixId,
             matrix,
             row,
             encQuery
           );
-          if (inserted) chunkRows++;
+          if (result.inserted) chunkInserted++;
+          if (result.updated) chunkUpdated++;
         }
 
-        await this.completeChunk(jobId, chunk.chunkNumber, chunkRows);
-        totalRows += chunkRows;
+        await this.completeChunk(
+          jobId,
+          chunk.chunkNumber,
+          chunkInserted + chunkUpdated
+        );
+        totalInserted += chunkInserted;
+        totalUpdated += chunkUpdated;
         completedChunks++;
+
+        // Save checkpoint for incremental sync
+        await this.checkpointService.saveCheckpoint(
+          matrixId,
+          encQuery,
+          chunkInserted + chunkUpdated
+        );
 
         // Update job progress
         await this.db
@@ -288,7 +314,8 @@ export class DataSyncService {
             matrixCode,
             chunk: chunk.chunkNumber,
             total: chunks.length,
-            rows: chunkRows,
+            inserted: chunkInserted,
+            updated: chunkUpdated,
           },
           "Completed chunk"
         );
@@ -304,11 +331,11 @@ export class DataSyncService {
       }
     }
 
-    await this.completeJob(jobId, totalRows);
+    await this.completeJob(jobId, totalInserted + totalUpdated);
 
     return {
-      rowsInserted: totalRows,
-      rowsUpdated: 0,
+      rowsInserted: totalInserted,
+      rowsUpdated: totalUpdated,
       chunksCompleted: completedChunks,
       totalChunks: chunks.length,
     };
@@ -397,14 +424,16 @@ export class DataSyncService {
   }
 
   /**
-   * Insert a statistic row
+   * Upsert a statistic row with idempotency support
+   *
+   * Returns { inserted: true } for new rows, { updated: true } for updates
    */
-  private async insertStatistic(
+  private async upsertStatisticRow(
     matrixId: number,
     matrix: InsMatrix,
     row: ParsedDataRow,
     encQuery: string
-  ): Promise<boolean> {
+  ): Promise<{ inserted: boolean; updated: boolean }> {
     // Lookup reference IDs
     const territoryId = await this.lookupTerritory(matrixId, matrix, row);
     const timePeriodId = await this.lookupTimePeriod(matrixId, matrix, row);
@@ -415,11 +444,27 @@ export class DataSyncService {
         { row: Object.fromEntries(row.dimensionValues) },
         "No time period found"
       );
-      return false;
+      return { inserted: false, updated: false };
     }
 
-    // Insert statistic
-    const newStat: NewStatistic = {
+    // Collect classification IDs BEFORE inserting (needed for natural key hash)
+    const classificationIds = await this.collectClassificationIds(
+      matrixId,
+      matrix,
+      row
+    );
+
+    // Compute natural key hash
+    const naturalKeyHash = computeNaturalKeyHash(
+      matrixId,
+      territoryId,
+      timePeriodId,
+      unitId,
+      classificationIds
+    );
+
+    // Prepare statistic with hash
+    const statWithHash: StatisticWithHash = {
       matrix_id: matrixId,
       territory_id: territoryId,
       time_period_id: timePeriodId,
@@ -427,30 +472,83 @@ export class DataSyncService {
       value: row.value,
       value_status: row.valueStatus,
       source_enc_query: encQuery,
+      natural_key_hash: naturalKeyHash,
     };
 
     try {
+      const result = await upsertStatistic(this.db, statWithHash);
+
+      // Only insert classifications for new rows
+      if (result.inserted) {
+        await this.insertClassifications(
+          matrixId,
+          result.id,
+          matrix,
+          row,
+          classificationIds
+        );
+      }
+
+      return { inserted: result.inserted, updated: result.updated };
+    } catch (error) {
+      logger.error(
+        { matrixId, error, hash: naturalKeyHash },
+        "Statistic upsert failed"
+      );
+      return { inserted: false, updated: false };
+    }
+  }
+
+  /**
+   * Collect classification value IDs for a row
+   */
+  private async collectClassificationIds(
+    matrixId: number,
+    matrix: InsMatrix,
+    row: ParsedDataRow
+  ): Promise<number[]> {
+    const classificationDims = matrix.dimensionsMap.filter(
+      (d) => this.matrixService.detectDimensionType(d) === "CLASSIFICATION"
+    );
+
+    const ids: number[] = [];
+
+    for (const dim of classificationDims) {
+      const label = row.dimensionValues.get(dim.dimCode);
+      if (!label) {
+        logger.debug(
+          { dimCode: dim.dimCode, dimLabel: dim.label },
+          "No label found for dimension"
+        );
+        continue;
+      }
+
+      // Query by dimension code to get correct classification
+      // Labels are normalized (trimmed) at storage time in matrix sync
       const result = await this.db
-        .insertInto("statistics")
-        .values(newStat)
-        .returning("id")
+        .selectFrom("matrix_dimension_options")
+        .innerJoin(
+          "matrix_dimensions",
+          "matrix_dimension_options.matrix_dimension_id",
+          "matrix_dimensions.id"
+        )
+        .select("matrix_dimension_options.classification_value_id")
+        .where("matrix_dimensions.matrix_id", "=", matrixId)
+        .where("matrix_dimensions.dim_code", "=", dim.dimCode)
+        .where("matrix_dimension_options.label", "=", label)
         .executeTakeFirst();
 
-      if (result) {
-        // Insert classification junctions
-        await this.insertClassifications(matrixId, result.id, matrix, row);
-        return true;
+      if (result?.classification_value_id) {
+        ids.push(result.classification_value_id);
+      } else {
+        logger.debug(
+          { dimCode: dim.dimCode, dimLabel: dim.label, optionLabel: label },
+          "No classification value found for option"
+        );
       }
-    } catch (error) {
-      // Likely duplicate - update instead
-      // For now, just log and skip
-      logger.debug(
-        { matrixId, error },
-        "Statistic insert failed (possible duplicate)"
-      );
     }
 
-    return false;
+    return ids;
   }
 
   /**
@@ -471,7 +569,7 @@ export class DataSyncService {
     const label = row.dimensionValues.get(territorialDim.dimCode);
     if (!label) return null;
 
-    // Find in matrix_dimension_options
+    // Find in matrix_dimension_options (labels normalized at storage)
     const result = await this.db
       .selectFrom("matrix_dimension_options")
       .innerJoin(
@@ -505,7 +603,7 @@ export class DataSyncService {
     const label = row.dimensionValues.get(temporalDim.dimCode);
     if (!label) return null;
 
-    // Find in matrix_dimension_options
+    // Find in matrix_dimension_options (labels normalized at storage)
     const result = await this.db
       .selectFrom("matrix_dimension_options")
       .innerJoin(
@@ -539,7 +637,7 @@ export class DataSyncService {
     const label = row.dimensionValues.get(unitDim.dimCode);
     if (!label) return null;
 
-    // Find in matrix_dimension_options
+    // Find in matrix_dimension_options (labels normalized at storage)
     const result = await this.db
       .selectFrom("matrix_dimension_options")
       .innerJoin(
@@ -557,48 +655,28 @@ export class DataSyncService {
 
   /**
    * Insert classification junction records
+   *
+   * Uses pre-collected classification IDs for efficiency
    */
   private async insertClassifications(
     matrixId: number,
     statisticId: number,
-    matrix: InsMatrix,
-    row: ParsedDataRow
+    _matrix: InsMatrix,
+    _row: ParsedDataRow,
+    classificationIds: number[]
   ): Promise<void> {
-    // Find classification dimensions
-    const classificationDims = matrix.dimensionsMap.filter(
-      (d) => this.matrixService.detectDimensionType(d) === "CLASSIFICATION"
-    );
-
-    for (const dim of classificationDims) {
-      const label = row.dimensionValues.get(dim.dimCode);
-      if (!label) continue;
-
-      // Find classification value ID
-      const result = await this.db
-        .selectFrom("matrix_dimension_options")
-        .innerJoin(
-          "matrix_dimensions",
-          "matrix_dimension_options.matrix_dimension_id",
-          "matrix_dimensions.id"
-        )
-        .select("matrix_dimension_options.classification_value_id")
-        .where("matrix_dimensions.matrix_id", "=", matrixId)
-        .where("matrix_dimension_options.label", "=", label)
-        .executeTakeFirst();
-
-      if (result?.classification_value_id) {
-        try {
-          await this.db
-            .insertInto("statistic_classifications")
-            .values({
-              matrix_id: matrixId,
-              statistic_id: statisticId,
-              classification_value_id: result.classification_value_id,
-            })
-            .execute();
-        } catch {
-          // Duplicate, ignore
-        }
+    for (const classificationValueId of classificationIds) {
+      try {
+        await this.db
+          .insertInto("statistic_classifications")
+          .values({
+            matrix_id: matrixId,
+            statistic_id: statisticId,
+            classification_value_id: classificationValueId,
+          })
+          .execute();
+      } catch {
+        // Duplicate, ignore
       }
     }
   }
@@ -771,7 +849,8 @@ export class DataSyncService {
     }
 
     const matrix = await fetchMatrix(matrixCode);
-    let totalRows = 0;
+    let totalInserted = 0;
+    let totalUpdated = 0;
 
     for (const chunk of pendingChunks) {
       try {
@@ -789,19 +868,33 @@ export class DataSyncService {
         const rows = parsePivotResponse(csvData);
         const parsed = this.parseRows(rows, matrix);
 
-        let chunkRows = 0;
+        let chunkInserted = 0;
+        let chunkUpdated = 0;
         for (const row of parsed) {
-          const inserted = await this.insertStatistic(
+          const result = await this.upsertStatisticRow(
             job.matrix_id,
             matrix,
             row,
             chunk.enc_query
           );
-          if (inserted) chunkRows++;
+          if (result.inserted) chunkInserted++;
+          if (result.updated) chunkUpdated++;
         }
 
-        await this.completeChunk(jobId, chunk.chunk_number, chunkRows);
-        totalRows += chunkRows;
+        await this.completeChunk(
+          jobId,
+          chunk.chunk_number,
+          chunkInserted + chunkUpdated
+        );
+        totalInserted += chunkInserted;
+        totalUpdated += chunkUpdated;
+
+        // Save checkpoint
+        await this.checkpointService.saveCheckpoint(
+          job.matrix_id,
+          chunk.enc_query,
+          chunkInserted + chunkUpdated
+        );
 
         await sleep(RATE_LIMIT_MS);
       } catch (error) {
@@ -818,9 +911,9 @@ export class DataSyncService {
       .executeTakeFirst();
 
     if (Number(remainingChunks?.count ?? 0) === 0) {
-      await this.completeJob(jobId, totalRows);
+      await this.completeJob(jobId, totalInserted + totalUpdated);
     }
 
-    return { rowsInserted: totalRows, rowsUpdated: 0 };
+    return { rowsInserted: totalInserted, rowsUpdated: totalUpdated };
   }
 }

@@ -4,7 +4,11 @@
 
 import { Type, type Static } from "@sinclair/typebox";
 
-import { PaginationQuerySchema, IdParamSchema } from "../schemas/common.js";
+import {
+  PaginationQuerySchema,
+  IdParamSchema,
+  LocaleSchema,
+} from "../schemas/common.js";
 import {
   ContextListResponseSchema,
   ContextSchema,
@@ -21,6 +25,7 @@ import type { FastifyInstance } from "fastify";
 const ListContextsQuerySchema = Type.Intersect([
   PaginationQuerySchema,
   Type.Object({
+    locale: Type.Optional(LocaleSchema),
     level: Type.Optional(
       Type.Number({
         minimum: 0,
@@ -74,9 +79,11 @@ export function registerContextRoutes(app: FastifyInstance): void {
       },
     },
     async (request) => {
-      const { level, parentId, pathPrefix, limit, cursor } = request.query;
+      const { locale, level, parentId, pathPrefix, limit, cursor } =
+        request.query;
 
       const result = await listContexts({
+        locale,
         level,
         parentId,
         pathPrefix,
@@ -93,11 +100,18 @@ export function registerContextRoutes(app: FastifyInstance): void {
     }
   );
 
+  const ContextDetailQuerySchema = Type.Object({
+    locale: Type.Optional(LocaleSchema),
+  });
+
   /**
    * GET /api/v1/contexts/:id
    * Get context details with children and ancestors
    */
-  app.get<{ Params: Static<typeof IdParamSchema> }>(
+  app.get<{
+    Params: Static<typeof IdParamSchema>;
+    Querystring: Static<typeof ContextDetailQuerySchema>;
+  }>(
     "/contexts/:id",
     {
       schema: {
@@ -107,6 +121,7 @@ export function registerContextRoutes(app: FastifyInstance): void {
           "If childrenType is 'matrix', children contains matrices; otherwise sub-contexts.",
         tags: ["Discovery"],
         params: IdParamSchema,
+        querystring: ContextDetailQuerySchema,
         response: {
           200: ContextDetailResponseSchema,
         },
@@ -114,12 +129,13 @@ export function registerContextRoutes(app: FastifyInstance): void {
     },
     async (request) => {
       const id = parseInt(request.params.id, 10);
+      const locale = request.query.locale ?? "ro";
 
       if (isNaN(id)) {
         return { error: "VALIDATION_ERROR", message: "Invalid context ID" };
       }
 
-      const result = await getContextById(id);
+      const result = await getContextById(id, locale);
 
       return {
         data: result,

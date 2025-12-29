@@ -55,15 +55,18 @@ async function rateLimitedFetch(
 
 /**
  * Fetch all top-level statistical domains (contexts)
+ * @param lang - Language for context names ('ro' or 'en'), defaults to 'ro'
  */
-export async function fetchContexts(): Promise<InsContext[]> {
-  const url = `${BASE_URL}/context/`;
-  apiLogger.info({ url }, "Fetching all contexts");
+export async function fetchContexts(
+  lang: Locale = "ro"
+): Promise<InsContext[]> {
+  const url = `${BASE_URL}/context/?lang=${lang}`;
+  apiLogger.info({ url, lang }, "Fetching all contexts");
 
   const response = await rateLimitedFetch(url);
   if (!response.ok) {
     apiLogger.error(
-      { status: response.status, statusText: response.statusText },
+      { status: response.status, statusText: response.statusText, lang },
       "Failed to fetch contexts"
     );
     throw new Error(`Failed to fetch contexts: ${response.statusText}`);
@@ -71,7 +74,7 @@ export async function fetchContexts(): Promise<InsContext[]> {
 
   const data = (await response.json()) as InsContext[];
   apiLogger.debug(
-    { contextCount: data.length, data },
+    { contextCount: data.length, lang },
     "Successfully fetched contexts"
   );
 
@@ -81,6 +84,29 @@ export async function fetchContexts(): Promise<InsContext[]> {
   }
 
   return data;
+}
+
+/**
+ * Fetch contexts in both RO and EN languages in parallel
+ * @returns Object with Romanian and English context lists
+ */
+export async function fetchContextsBilingual(): Promise<{
+  ro: InsContext[];
+  en: InsContext[];
+}> {
+  apiLogger.info("Fetching contexts in both RO and EN languages");
+
+  const [ro, en] = await Promise.all([
+    fetchContexts("ro"),
+    fetchContexts("en"),
+  ]);
+
+  apiLogger.debug(
+    { roCount: ro.length, enCount: en.length },
+    "Successfully fetched bilingual contexts"
+  );
+
+  return { ro, en };
 }
 
 /**
@@ -162,16 +188,21 @@ export async function fetchMatricesListBilingual(): Promise<{
 
 /**
  * Fetch metadata for a specific matrix (dimensions, options, etc.)
+ * @param lang - Language for matrix metadata ('ro' or 'en'), defaults to 'ro'
  */
-export async function fetchMatrix(code: string): Promise<InsMatrix> {
-  const url = `${BASE_URL}/matrix/${code}`;
-  apiLogger.info({ url, matrixCode: code }, "Fetching matrix metadata");
+export async function fetchMatrix(
+  code: string,
+  lang: Locale = "ro"
+): Promise<InsMatrix> {
+  const url = `${BASE_URL}/matrix/${code}?lang=${lang}`;
+  apiLogger.info({ url, matrixCode: code, lang }, "Fetching matrix metadata");
 
   const response = await rateLimitedFetch(url);
   if (!response.ok) {
     apiLogger.error(
       {
         matrixCode: code,
+        lang,
         status: response.status,
         statusText: response.statusText,
       },
@@ -182,7 +213,7 @@ export async function fetchMatrix(code: string): Promise<InsMatrix> {
 
   const data = (await response.json()) as InsMatrix;
   apiLogger.debug(
-    { matrixCode: code, data },
+    { matrixCode: code, lang },
     "Successfully fetched matrix metadata"
   );
 
@@ -208,6 +239,33 @@ export async function fetchMatrix(code: string): Promise<InsMatrix> {
   }
 
   return data;
+}
+
+/**
+ * Fetch matrix metadata in both RO and EN languages in parallel
+ * @param code - Matrix code
+ * @returns Object with Romanian and English matrix metadata
+ */
+export async function fetchMatrixBilingual(code: string): Promise<{
+  ro: InsMatrix;
+  en: InsMatrix;
+}> {
+  apiLogger.info(
+    { matrixCode: code },
+    "Fetching matrix in both RO and EN languages"
+  );
+
+  const [ro, en] = await Promise.all([
+    fetchMatrix(code, "ro"),
+    fetchMatrix(code, "en"),
+  ]);
+
+  apiLogger.debug(
+    { matrixCode: code },
+    "Successfully fetched bilingual matrix metadata"
+  );
+
+  return { ro, en };
 }
 
 /**

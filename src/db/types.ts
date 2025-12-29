@@ -18,7 +18,19 @@ export type MatrixStatus = "ACTIVE" | "DISCONTINUED";
 
 export type ScrapeStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
 
-export type ChunkStrategy = "BY_YEAR" | "BY_TERRITORY" | "BY_CLASSIFICATION";
+/**
+ * Chunking strategies for data sync:
+ * - BY_YEAR: Chunk by time period only (for smaller matrices)
+ * - BY_YEAR_TERRITORY: Chunk by (time, territory) for locality-level matrices
+ *   where each year alone exceeds 30,000 cells
+ * - BY_TERRITORY: Chunk by territory only
+ * - BY_CLASSIFICATION: Chunk by classification dimension
+ */
+export type ChunkStrategy =
+  | "BY_YEAR"
+  | "BY_YEAR_TERRITORY"
+  | "BY_TERRITORY"
+  | "BY_CLASSIFICATION";
 
 export type SyncStatusType =
   | "NEVER_SYNCED"
@@ -39,6 +51,7 @@ export interface ContextsTable {
   id: Generated<number>;
   ins_code: string;
   name: string;
+  name_en: string | null;
   level: number;
   parent_id: number | null;
   path: string;
@@ -136,10 +149,15 @@ export interface MatricesTable {
   context_id: number | null;
   periodicity: PeriodicityType[];
   definition: string | null;
+  definition_en: string | null;
   methodology: string | null;
+  methodology_en: string | null;
   observations: string | null;
+  observations_en: string | null;
   series_break: string | null;
+  series_break_en: string | null;
   series_continuation: string | null;
+  series_continuation_en: string | null;
   responsible_persons: string | null;
   start_year: number | null;
   end_year: number | null;
@@ -170,6 +188,7 @@ export interface MatrixDataSourcesTable {
   id: Generated<number>;
   matrix_id: number;
   name: string;
+  name_en: string | null;
   source_type: string | null;
   link_number: number | null;
   source_code: number | null;
@@ -183,6 +202,7 @@ export interface MatrixDimensionsTable {
   matrix_id: number;
   dim_code: number;
   label: string;
+  label_en: string | null;
   dimension_type: DimensionType;
   classification_type_id: number | null;
   is_hierarchical: boolean;
@@ -198,6 +218,7 @@ export interface MatrixDimensionOptionsTable {
   matrix_dimension_id: number;
   nom_item_id: number;
   label: string;
+  label_en: string | null;
   offset_order: number;
   parent_nom_item_id: number | null;
   territory_id: number | null;

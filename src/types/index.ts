@@ -52,6 +52,22 @@ export interface InsDataSource {
 }
 
 /**
+ * Series break info (when a matrix is discontinued)
+ */
+export interface InsSeriesBreak {
+  lastPeriod: string;
+  nextMatrixCode: string;
+}
+
+/**
+ * Series continuation info (when a matrix continues from another)
+ */
+export interface InsSeriesContinuation {
+  matCode: string;
+  lastPeriod: string;
+}
+
+/**
  * Complete matrix details flags
  */
 export interface InsMatrixDetails {
@@ -134,10 +150,10 @@ export interface InsMatrix {
   persoaneResponsabile?: string | null;
   /** Dimension definitions with options */
   dimensionsMap: InsDimension[];
-  /** Series interruption info */
-  intrerupere?: string | null;
-  /** Series continuation info */
-  continuareSerie?: string | null;
+  /** Series interruption info (when discontinued) */
+  intrerupere?: InsSeriesBreak | null;
+  /** Series continuation info (when continuing from previous matrix) */
+  continuareSerie?: InsSeriesContinuation[] | null;
   /** Matrix capability flags */
   details: InsMatrixDetails;
 }

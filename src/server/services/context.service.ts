@@ -27,6 +27,7 @@ export interface ListContextsOptions {
   pathPrefix?: string;
   limit?: number;
   cursor?: string;
+  locale?: "ro" | "en";
 }
 
 // ============================================================================
@@ -41,6 +42,7 @@ export async function listContexts(
 ): Promise<PaginatedResult<ContextDto>> {
   const limit = parseLimit(options.limit, 50, 100);
   const cursorPayload = validateCursor(options.cursor);
+  const locale = options.locale ?? "ro";
 
   let query = db
     .selectFrom("contexts")
@@ -48,6 +50,7 @@ export async function listContexts(
       "id",
       "ins_code",
       "name",
+      "name_en",
       "level",
       "parent_id",
       "path",
@@ -88,7 +91,7 @@ export async function listContexts(
     .execute();
 
   const hasMore = rows.length > limit;
-  const items = rows.slice(0, limit).map(mapContextRow);
+  const items = rows.slice(0, limit).map((row) => mapContextRow(row, locale));
 
   return {
     items,
@@ -104,7 +107,10 @@ export async function listContexts(
 /**
  * Get context by ID with children and ancestors
  */
-export async function getContextById(id: number): Promise<ContextDetailDto> {
+export async function getContextById(
+  id: number,
+  locale: "ro" | "en" = "ro"
+): Promise<ContextDetailDto> {
   // Get the context
   const context = await db
     .selectFrom("contexts")
@@ -112,6 +118,7 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
       "id",
       "ins_code",
       "name",
+      "name_en",
       "level",
       "parent_id",
       "path",
@@ -124,7 +131,7 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
     throw new NotFoundError(`Context with ID ${String(id)} not found`);
   }
 
-  const contextDto = mapContextRow(context);
+  const contextDto = mapContextRow(context, locale);
 
   // Get ancestors by traversing up the hierarchy
   const ancestors: ContextDto[] = [];
@@ -137,6 +144,7 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
         "id",
         "ins_code",
         "name",
+        "name_en",
         "level",
         "parent_id",
         "path",
@@ -146,7 +154,7 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
       .executeTakeFirst();
 
     if (parent) {
-      ancestors.unshift(mapContextRow(parent));
+      ancestors.unshift(mapContextRow(parent, locale));
       currentParentId = parent.parent_id;
     } else {
       break;
@@ -161,6 +169,7 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
         "id",
         "ins_code",
         "name",
+        "name_en",
         "level",
         "parent_id",
         "path",
@@ -172,7 +181,7 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
 
     return {
       context: contextDto,
-      children: childContexts.map(mapContextRow),
+      children: childContexts.map((row) => mapContextRow(row, locale)),
       ancestors,
     };
   } else {
@@ -183,6 +192,7 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
         "id",
         "ins_code",
         "name",
+        "name_en",
         "periodicity",
         "has_uat_data",
         "has_county_data",
@@ -196,12 +206,15 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
       .orderBy("name", "asc")
       .execute();
 
+    const localizedContextName =
+      locale === "en" && context.name_en ? context.name_en : context.name;
+
     const matrixDtos: MatrixSummaryDto[] = matrices.map((m) => ({
       id: m.id,
       insCode: m.ins_code,
-      name: m.name,
+      name: locale === "en" && m.name_en ? m.name_en : m.name,
       contextPath: context.path,
-      contextName: context.name,
+      contextName: localizedContextName,
       periodicity: m.periodicity ?? [],
       hasUatData: m.has_uat_data,
       hasCountyData: m.has_county_data,
@@ -223,13 +236,17 @@ export async function getContextById(id: number): Promise<ContextDetailDto> {
 /**
  * Get context by INS code
  */
-export async function getContextByCode(insCode: string): Promise<ContextDto> {
+export async function getContextByCode(
+  insCode: string,
+  locale: "ro" | "en" = "ro"
+): Promise<ContextDto> {
   const context = await db
     .selectFrom("contexts")
     .select([
       "id",
       "ins_code",
       "name",
+      "name_en",
       "level",
       "parent_id",
       "path",
@@ -242,7 +259,7 @@ export async function getContextByCode(insCode: string): Promise<ContextDto> {
     throw new NotFoundError(`Context with code ${insCode} not found`);
   }
 
-  return mapContextRow(context);
+  return mapContextRow(context, locale);
 }
 
 // ============================================================================
@@ -253,17 +270,21 @@ interface ContextRow {
   id: number;
   ins_code: string;
   name: string;
+  name_en: string | null;
   level: number;
   parent_id: number | null;
   path: string;
   children_type: string;
 }
 
-function mapContextRow(row: ContextRow): ContextDto {
+function mapContextRow(
+  row: ContextRow,
+  locale: "ro" | "en" = "ro"
+): ContextDto {
   return {
     id: row.id,
     insCode: row.ins_code,
-    name: row.name,
+    name: locale === "en" && row.name_en ? row.name_en : row.name,
     level: row.level,
     parentId: row.parent_id,
     path: row.path,

@@ -4,7 +4,7 @@ import { TimePeriodService } from "./time-periods.js";
 import { UnitOfMeasureService } from "./units.js";
 import { logger } from "../../logger.js";
 import {
-  fetchMatrix,
+  fetchMatrixBilingual,
   fetchMatricesListBilingual,
 } from "../../scraper/client.js";
 
@@ -17,7 +17,11 @@ import type {
   PeriodicityType,
   SyncResult,
 } from "../../db/types.js";
-import type { InsMatrix, InsDimension } from "../../types/index.js";
+import type {
+  InsMatrix,
+  InsDimension,
+  InsDataSource,
+} from "../../types/index.js";
 import type { Kysely } from "kysely";
 
 // ============================================================================
@@ -152,19 +156,23 @@ export class MatrixSyncService {
   }
 
   /**
-   * Sync full metadata for a specific matrix
+   * Sync full metadata for a specific matrix (bilingual)
    */
   async syncMatrixDetails(matrixCode: string): Promise<void> {
-    logger.info({ matrixCode }, "Syncing matrix details");
+    logger.info({ matrixCode }, "Syncing matrix details (bilingual)");
 
-    const metadata = await fetchMatrix(matrixCode);
+    // Fetch both languages in parallel
+    const { ro: metadataRo, en: metadataEn } =
+      await fetchMatrixBilingual(matrixCode);
+
     const matrixId = await this.getMatrixId(matrixCode);
 
     if (!matrixId) {
       // Create matrix first
       const newMatrix: NewMatrix = {
         ins_code: matrixCode,
-        name: metadata.matrixName,
+        name: metadataRo.matrixName,
+        name_en: metadataEn.matrixName ?? null,
         status: "ACTIVE",
         dimension_count: 0,
         has_county_data: false,
@@ -180,46 +188,73 @@ export class MatrixSyncService {
 
     const id = (await this.getMatrixId(matrixCode))!;
 
-    // Update matrix with full details
+    // Build EN lookup maps for dimensions and options
+    const enDimLabelMap = new Map<number, string>();
+    for (const dim of metadataEn.dimensionsMap) {
+      enDimLabelMap.set(dim.dimCode, dim.label);
+    }
+
+    const enOptLabelMap = new Map<number, string>();
+    for (const dim of metadataEn.dimensionsMap) {
+      for (const opt of dim.options) {
+        enOptLabelMap.set(opt.nomItemId, opt.label);
+      }
+    }
+
+    // Update matrix with full details (RO + EN bilingual data)
     await this.db
       .updateTable("matrices")
       .set({
-        name: metadata.matrixName,
-        periodicity: mapPeriodicity(metadata.periodicitati),
-        definition: metadata.definitie ?? null,
-        methodology: metadata.metodologie ?? null,
-        observations: metadata.observatii ?? null,
-        series_break: metadata.intrerupere ?? null,
-        series_continuation: metadata.continuareSerie ?? null,
-        responsible_persons: metadata.persoaneResponsabile ?? null,
-        last_update: parseInsDate(metadata.ultimaActualizare),
-        dimension_count: metadata.details.matMaxDim,
-        has_county_data: metadata.details.nomJud > 0,
-        has_uat_data: metadata.details.nomLoc > 0,
-        has_siruta: metadata.details.matSiruta > 0,
-        has_caen_rev1: metadata.details.matCaen1 > 0,
-        has_caen_rev2: metadata.details.matCaen2 > 0,
+        name: metadataRo.matrixName,
+        name_en: metadataEn.matrixName ?? null,
+        periodicity: mapPeriodicity(metadataRo.periodicitati),
+        definition: metadataRo.definitie ?? null,
+        definition_en: metadataEn.definitie ?? null,
+        methodology: metadataRo.metodologie ?? null,
+        methodology_en: metadataEn.metodologie ?? null,
+        observations: metadataRo.observatii ?? null,
+        observations_en: metadataEn.observatii ?? null,
+        series_break: metadataRo.intrerupere
+          ? JSON.stringify(metadataRo.intrerupere)
+          : null,
+        series_break_en: metadataEn.intrerupere
+          ? JSON.stringify(metadataEn.intrerupere)
+          : null,
+        series_continuation: metadataRo.continuareSerie
+          ? JSON.stringify(metadataRo.continuareSerie)
+          : null,
+        series_continuation_en: metadataEn.continuareSerie
+          ? JSON.stringify(metadataEn.continuareSerie)
+          : null,
+        responsible_persons: metadataRo.persoaneResponsabile ?? null,
+        last_update: parseInsDate(metadataRo.ultimaActualizare),
+        dimension_count: metadataRo.details.matMaxDim,
+        has_county_data: metadataRo.details.nomJud > 0,
+        has_uat_data: metadataRo.details.nomLoc > 0,
+        has_siruta: metadataRo.details.matSiruta > 0,
+        has_caen_rev1: metadataRo.details.matCaen1 > 0,
+        has_caen_rev2: metadataRo.details.matCaen2 > 0,
         territorial_dim_index:
-          metadata.details.matRegJ > 0 ? metadata.details.matRegJ : null,
+          metadataRo.details.matRegJ > 0 ? metadataRo.details.matRegJ : null,
         time_dim_index:
-          metadata.details.matTime > 0 ? metadata.details.matTime : null,
+          metadataRo.details.matTime > 0 ? metadataRo.details.matTime : null,
         county_dim_index:
-          metadata.details.nomJud > 0 ? metadata.details.nomJud : null,
+          metadataRo.details.nomJud > 0 ? metadataRo.details.nomJud : null,
         locality_dim_index:
-          metadata.details.nomLoc > 0 ? metadata.details.nomLoc : null,
-        um_special: metadata.details.matUMSpec > 0,
-        status: metadata.details.matActive > 0 ? "ACTIVE" : "DISCONTINUED",
-        view_count: metadata.details.matViews ?? 0,
-        download_count: metadata.details.matDownloads ?? 0,
-        query_complexity: metadata.details.matCharge ?? 0,
+          metadataRo.details.nomLoc > 0 ? metadataRo.details.nomLoc : null,
+        um_special: metadataRo.details.matUMSpec > 0,
+        status: metadataRo.details.matActive > 0 ? "ACTIVE" : "DISCONTINUED",
+        view_count: metadataRo.details.matViews ?? 0,
+        download_count: metadataRo.details.matDownloads ?? 0,
+        query_complexity: metadataRo.details.matCharge ?? 0,
         updated_at: new Date(),
       })
       .where("id", "=", id)
       .execute();
 
     // Link to context
-    if (metadata.ancestors && metadata.ancestors.length > 0) {
-      const leafContext = metadata.ancestors.at(-1);
+    if (metadataRo.ancestors && metadataRo.ancestors.length > 0) {
+      const leafContext = metadataRo.ancestors.at(-1);
       if (leafContext) {
         const contextId = await this.getContextIdByCode(leafContext.code);
         if (contextId) {
@@ -232,13 +267,60 @@ export class MatrixSyncService {
       }
     }
 
-    // Sync dimensions
-    await this.syncDimensions(id, metadata);
+    // Build EN lookup for data sources (by linkNumber)
+    const enDataSourceMap = new Map<number, string>();
+    for (const ds of metadataEn.surseDeDate ?? []) {
+      enDataSourceMap.set(ds.linkNumber, ds.nume);
+    }
+
+    // Sync data sources with EN translations
+    await this.syncDataSources(
+      id,
+      metadataRo.surseDeDate ?? [],
+      enDataSourceMap
+    );
+
+    // Sync dimensions with EN label maps
+    await this.syncDimensions(id, metadataRo, enDimLabelMap, enOptLabelMap);
 
     // Update sync status
     await this.updateSyncStatus(id, "metadata");
 
-    logger.info({ matrixCode, matrixId: id }, "Matrix details synced");
+    logger.info(
+      { matrixCode, matrixId: id },
+      "Matrix details synced (bilingual)"
+    );
+  }
+
+  /**
+   * Sync data sources for a matrix (bilingual)
+   */
+  private async syncDataSources(
+    matrixId: number,
+    dataSources: InsDataSource[],
+    enNameMap: Map<number, string>
+  ): Promise<void> {
+    // Clear existing data sources
+    await this.db
+      .deleteFrom("matrix_data_sources")
+      .where("matrix_id", "=", matrixId)
+      .execute();
+
+    for (const ds of dataSources) {
+      const nameEn = enNameMap.get(ds.linkNumber) ?? null;
+
+      await this.db
+        .insertInto("matrix_data_sources")
+        .values({
+          matrix_id: matrixId,
+          name: ds.nume,
+          name_en: nameEn,
+          source_type: ds.tip || null,
+          link_number: ds.linkNumber,
+          source_code: ds.codTip,
+        })
+        .execute();
+    }
   }
 
   /**
@@ -246,7 +328,9 @@ export class MatrixSyncService {
    */
   private async syncDimensions(
     matrixId: number,
-    metadata: InsMatrix
+    metadata: InsMatrix,
+    enDimLabelMap: Map<number, string>,
+    enOptLabelMap: Map<number, string>
   ): Promise<void> {
     // Clear existing dimensions
     await this.db
@@ -264,11 +348,15 @@ export class MatrixSyncService {
           await this.classificationService.findOrCreateType(dim.label);
       }
 
+      // Get EN label for this dimension
+      const labelEn = enDimLabelMap.get(dim.dimCode) ?? null;
+
       // Insert dimension
       const newDim: NewMatrixDimension = {
         matrix_id: matrixId,
         dim_code: dim.dimCode,
         label: dim.label,
+        label_en: labelEn,
         dimension_type: dimType,
         classification_type_id: classificationTypeId,
         is_hierarchical: dim.options.some((o) => o.parentId !== null),
@@ -283,12 +371,13 @@ export class MatrixSyncService {
 
       const dimId = dimResult!.id;
 
-      // Sync options
+      // Sync options with EN label map
       await this.syncDimensionOptions(
         dimId,
         dim,
         dimType,
-        classificationTypeId
+        classificationTypeId,
+        enOptLabelMap
       );
     }
   }
@@ -300,7 +389,8 @@ export class MatrixSyncService {
     dimId: number,
     dim: InsDimension,
     dimType: DimensionType,
-    classificationTypeId: number | null
+    classificationTypeId: number | null,
+    enOptLabelMap: Map<number, string>
   ): Promise<void> {
     // Build parent nomItemId to classification value ID mapping
     const parentMap = new Map<number, number>();
@@ -344,10 +434,14 @@ export class MatrixSyncService {
           break;
       }
 
+      // Get EN label for this option
+      const labelEn = enOptLabelMap.get(opt.nomItemId) ?? null;
+
       const newOption: NewMatrixDimensionOption = {
         matrix_dimension_id: dimId,
         nom_item_id: opt.nomItemId,
         label: opt.label.trim(), // Normalize whitespace at storage
+        label_en: labelEn?.trim() ?? null,
         offset_order: opt.offset,
         parent_nom_item_id: opt.parentId ?? null,
         territory_id: territoryId,

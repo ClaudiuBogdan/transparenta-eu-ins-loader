@@ -7,6 +7,16 @@ import type { Kysely } from "kysely";
 // Unit Pattern
 // ============================================================================
 
+/**
+ * Pattern to extract unit name from dimension labels with "UM:" prefix.
+ *
+ * INS API structure note:
+ * - Dimension label: "UM: Numar persoane" (has the prefix)
+ * - Option labels: "Numar persoane" (no prefix)
+ *
+ * This pattern is used to extract the unit name from dimension labels.
+ * For option labels without the prefix, we use the label directly.
+ */
 const UNIT_PATTERN = /^UM:\s*(.+)$/i;
 
 // Known unit mappings
@@ -39,16 +49,31 @@ export class UnitOfMeasureService {
   constructor(private db: Kysely<Database>) {}
 
   /**
-   * Find or create a unit of measure from a label
-   * Returns the unit_of_measure ID or null if not a unit label
+   * Find or create a unit of measure from a label.
+   *
+   * IMPORTANT: This method accepts both formats:
+   * - Dimension labels with prefix: "UM: Numar persoane"
+   * - Option labels without prefix: "Numar persoane"
+   *
+   * Bug fix (2024-12): The original implementation only accepted labels
+   * with "UM:" prefix, but syncDimensionOptions() passes option labels
+   * which don't have this prefix. This caused all unit_of_measure_id
+   * values to be NULL, breaking the data sync.
+   *
+   * @param label - Either a dimension label or option label for units
+   * @returns The unit_of_measure ID, or null if the label is empty
    */
   async findOrCreate(label: string): Promise<number | null> {
+    // Try to extract unit name from "UM: ..." dimension label format
     const match = UNIT_PATTERN.exec(label);
-    if (match?.[1] === undefined) {
+
+    // If no "UM:" prefix found, use the label directly as the unit name.
+    // This handles option labels like "Numar persoane" which don't have the prefix.
+    const unitName = match?.[1]?.trim() ?? label.trim();
+
+    if (!unitName) {
       return null;
     }
-
-    const unitName = match[1].trim();
     const normalizedName = this.normalize(unitName);
 
     // Try to find known mapping

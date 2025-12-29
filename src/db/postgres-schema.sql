@@ -48,7 +48,9 @@ CREATE TYPE matrix_status AS ENUM ('ACTIVE', 'DISCONTINUED');
 CREATE TYPE scrape_status AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED');
 
 -- Chunk strategy for large queries
-CREATE TYPE chunk_strategy AS ENUM ('BY_YEAR', 'BY_TERRITORY', 'BY_CLASSIFICATION');
+-- BY_YEAR_TERRITORY: Added for locality-level matrices where each year chunk
+-- exceeds 30,000 cells (e.g., POP107D has 42M cells per year)
+CREATE TYPE chunk_strategy AS ENUM ('BY_YEAR', 'BY_YEAR_TERRITORY', 'BY_TERRITORY', 'BY_CLASSIFICATION');
 
 -- ============================================================================
 -- SECTION 2: REFERENCE TABLES
@@ -63,6 +65,7 @@ CREATE TABLE contexts (
     -- INS API fields
     ins_code VARCHAR(10) NOT NULL,
     name TEXT NOT NULL,
+    name_en TEXT,  -- English translation from INS API
     level SMALLINT NOT NULL DEFAULT 0,
 
     -- Hierarchy
@@ -296,10 +299,15 @@ CREATE TABLE matrices (
     -- Metadata
     periodicity periodicity_type[] NOT NULL DEFAULT '{}',
     definition TEXT,
+    definition_en TEXT,  -- English translation from INS API
     methodology TEXT,
+    methodology_en TEXT,  -- English translation from INS API
     observations TEXT,
+    observations_en TEXT,  -- English translation from INS API
     series_break TEXT,
+    series_break_en TEXT,  -- English translation (lastPeriod field)
     series_continuation TEXT,
+    series_continuation_en TEXT,  -- English translation (lastPeriod fields)
     responsible_persons TEXT,
 
     -- Time coverage
@@ -362,6 +370,7 @@ CREATE TABLE matrix_data_sources (
     matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
 
     name TEXT NOT NULL,
+    name_en TEXT,  -- English translation from INS API
     source_type VARCHAR(50),
     link_number INTEGER,
     source_code INTEGER,
@@ -385,6 +394,7 @@ CREATE TABLE matrix_dimensions (
     -- INS API fields
     dim_code SMALLINT NOT NULL,
     label VARCHAR(200) NOT NULL,
+    label_en VARCHAR(200),  -- English translation from INS API
 
     -- Type classification
     dimension_type dimension_type NOT NULL,
@@ -423,6 +433,7 @@ CREATE TABLE matrix_dimension_options (
     -- INS API fields (required for query building)
     nom_item_id INTEGER NOT NULL,
     label VARCHAR(500) NOT NULL,
+    label_en VARCHAR(500),  -- English translation from INS API
     offset_order INTEGER NOT NULL,
     parent_nom_item_id INTEGER,
 

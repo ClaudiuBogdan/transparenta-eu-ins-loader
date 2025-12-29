@@ -303,10 +303,15 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "matrices.last_update",
           "matrices.status",
           "matrices.definition",
+          "matrices.definition_en",
           "matrices.methodology",
+          "matrices.methodology_en",
           "matrices.observations",
+          "matrices.observations_en",
           "matrices.series_break",
+          "matrices.series_break_en",
           "matrices.series_continuation",
+          "matrices.series_continuation_en",
           "matrices.responsible_persons",
           "matrices.view_count",
           "matrices.download_count",
@@ -332,6 +337,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "matrix_dimensions.id",
           "matrix_dimensions.dim_code",
           "matrix_dimensions.label",
+          "matrix_dimensions.label_en",
           "matrix_dimensions.dimension_type",
           "matrix_dimensions.is_hierarchical",
           "matrix_dimensions.option_count",
@@ -344,7 +350,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
       // Get data sources
       const dataSources = await db
         .selectFrom("matrix_data_sources")
-        .select(["name", "source_type"])
+        .select(["name", "name_en", "source_type"])
         .where("matrix_id", "=", matrix.id)
         .execute();
 
@@ -365,7 +371,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
       const matrixDetail: MatrixDetailDto = {
         id: matrix.id,
         insCode: matrix.ins_code,
-        // Use locale-appropriate name, fallback to RO if EN not available
+        // Use locale-appropriate values, fallback to RO if EN not available
         name: locale === "en" && matrix.name_en ? matrix.name_en : matrix.name,
         contextPath: matrix.context_path,
         contextName: matrix.context_name,
@@ -377,16 +383,31 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
         endYear: matrix.end_year,
         lastUpdate: matrix.last_update?.toISOString() ?? null,
         status: matrix.status,
-        definition: matrix.definition,
-        methodology: matrix.methodology,
-        observations: matrix.observations,
-        seriesBreak: matrix.series_break,
-        seriesContinuation: matrix.series_continuation,
+        definition:
+          locale === "en" && matrix.definition_en
+            ? matrix.definition_en
+            : matrix.definition,
+        methodology:
+          locale === "en" && matrix.methodology_en
+            ? matrix.methodology_en
+            : matrix.methodology,
+        observations:
+          locale === "en" && matrix.observations_en
+            ? matrix.observations_en
+            : matrix.observations,
+        seriesBreak:
+          locale === "en" && matrix.series_break_en
+            ? matrix.series_break_en
+            : matrix.series_break,
+        seriesContinuation:
+          locale === "en" && matrix.series_continuation_en
+            ? matrix.series_continuation_en
+            : matrix.series_continuation,
         responsiblePersons: matrix.responsible_persons,
         viewCount: matrix.view_count ?? 0,
         downloadCount: matrix.download_count ?? 0,
         dataSources: dataSources.map((ds) => ({
-          name: ds.name,
+          name: locale === "en" && ds.name_en ? ds.name_en : ds.name,
           sourceType: ds.source_type,
         })),
       };
@@ -394,7 +415,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
       const dimensionDtos: DimensionInfoDto[] = dimensions.map((d) => ({
         id: d.id,
         dimCode: d.dim_code,
-        label: d.label,
+        label: locale === "en" && d.label_en ? d.label_en : d.label,
         dimensionType: d.dimension_type,
         classificationTypeCode: d.classification_type_code ?? undefined,
         isHierarchical: d.is_hierarchical,
@@ -423,11 +444,18 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
     }
   );
 
+  const DimensionOptionsQuerySchema = Type.Object({
+    locale: Type.Optional(LocaleSchema),
+  });
+
   /**
    * GET /api/v1/matrices/:code/dimensions/:dimCode
    * Get dimension options
    */
-  app.get<{ Params: DimCodeParam }>(
+  app.get<{
+    Params: DimCodeParam;
+    Querystring: Static<typeof DimensionOptionsQuerySchema>;
+  }>(
     "/matrices/:code/dimensions/:dimCode",
     {
       schema: {
@@ -438,11 +466,13 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "Example: `/matrices/POP105A/dimensions/2` returns available territories.",
         tags: ["Matrices"],
         params: DimCodeParamSchema,
+        querystring: DimensionOptionsQuerySchema,
         // Response schema disabled - complex nested objects cause serialization issues
       },
     },
     async (request) => {
       const { code, dimCode } = request.params;
+      const locale = request.query.locale ?? "ro";
       const dimCodeNum = parseInt(dimCode, 10);
 
       if (isNaN(dimCodeNum)) {
@@ -467,6 +497,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "id",
           "dim_code",
           "label",
+          "label_en",
           "dimension_type",
           "is_hierarchical",
           "option_count",
@@ -508,6 +539,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "matrix_dimension_options.id",
           "matrix_dimension_options.nom_item_id",
           "matrix_dimension_options.label",
+          "matrix_dimension_options.label_en",
           "matrix_dimension_options.offset_order",
           "matrix_dimension_options.parent_nom_item_id",
           "territories.id as territory_id",
@@ -570,7 +602,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
         return {
           id: opt.id,
           nomItemId: opt.nom_item_id,
-          label: opt.label,
+          label: locale === "en" && opt.label_en ? opt.label_en : opt.label,
           offsetOrder: opt.offset_order,
           parentNomItemId: opt.parent_nom_item_id,
           reference,
@@ -583,7 +615,10 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           dimension: {
             id: dimension.id,
             dimCode: dimension.dim_code,
-            label: dimension.label,
+            label:
+              locale === "en" && dimension.label_en
+                ? dimension.label_en
+                : dimension.label,
             dimensionType: dimension.dimension_type,
             isHierarchical: dimension.is_hierarchical,
             optionCount: dimension.option_count,

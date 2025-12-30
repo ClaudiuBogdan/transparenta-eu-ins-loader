@@ -2,7 +2,7 @@ import { sql } from "kysely";
 import ora from "ora";
 
 import { db, closeConnection } from "../../db/connection.js";
-import { SyncOrchestrator } from "../../services/sync-v2/index.js";
+import { SyncOrchestrator } from "../../services/sync/index.js";
 
 import type { Command } from "commander";
 
@@ -13,7 +13,7 @@ import type { Command } from "commander";
 export function registerSyncCommand(program: Command): void {
   const sync = program
     .command("sync")
-    .description("Synchronize data from INS Tempo API (V2 schema)")
+    .description("Synchronize data from INS Tempo API")
     .addHelpText(
       "after",
       `

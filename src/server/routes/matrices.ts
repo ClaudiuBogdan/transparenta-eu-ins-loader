@@ -1,6 +1,5 @@
 /**
  * Matrix Routes - /api/v1/matrices
- * Updated for V2 schema with JSONB metadata
  */
 
 import { Type, type Static } from "@sinclair/typebox";

@@ -1,6 +1,5 @@
 /**
  * Territory Routes - /api/v1/territories
- * Updated for V2 schema with JSONB names
  */
 
 import { Type, type Static } from "@sinclair/typebox";

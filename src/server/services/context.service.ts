@@ -1,6 +1,6 @@
 /**
  * Context Service - Business logic for context operations
- * Updated for V2 schema with JSONB names
+ * Updated for schema with JSONB names
  */
 
 import { sql } from "kysely";
@@ -14,7 +14,7 @@ import {
 } from "../../utils/pagination.js";
 import { NotFoundError } from "../plugins/error-handler.js";
 
-import type { BilingualText } from "../../db/types-v2.js";
+import type { BilingualText } from "../../db/types.js";
 import type {
   ContextDto,
   ContextDetailDto,

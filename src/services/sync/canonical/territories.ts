@@ -5,7 +5,7 @@ import type {
   Database,
   TerritoryLevel,
   BilingualText,
-} from "../../../db/types-v2.js";
+} from "../../../db/types.js";
 import type { Kysely } from "kysely";
 
 // ============================================================================

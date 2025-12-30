@@ -1,17 +1,19 @@
-// Sync Services - Re-exports
-export { TimePeriodService } from "./time-periods.js";
-export { ClassificationService } from "./classifications.js";
-export { UnitOfMeasureService } from "./units.js";
-export { TerritoryService } from "./territories.js";
-export { ContextSyncService } from "./contexts.js";
-export { MatrixSyncService } from "./matrices.js";
-export { DataSyncService } from "./data.js";
-export { SyncCheckpointService } from "./checkpoints.js";
-export {
-  computeNaturalKeyHash,
-  upsertStatistic,
-  batchUpsertStatistics,
-  prepareStatisticWithHash,
-  type UpsertResult,
-  type StatisticWithHash,
-} from "./upsert.js";
+/**
+ * Sync Services
+ *
+ * Three-layer sync architecture:
+ * 1. Raw Layer - Fetch and preserve exact INS API responses
+ * 2. Canonical Layer - Normalize and deduplicate entities
+ * 3. Process Layer - Build relationships and fact tables
+ */
+
+// Canonical services
+export { TerritoryService } from "./canonical/territories.js";
+export { TimePeriodService } from "./canonical/time-periods.js";
+export { ClassificationService } from "./canonical/classifications.js";
+export { UnitService } from "./canonical/units.js";
+export { LabelResolver } from "./canonical/label-resolver.js";
+
+// Orchestration
+export { SyncOrchestrator } from "./orchestrator.js";
+export type { SyncOptions, SyncProgress } from "./orchestrator.js";

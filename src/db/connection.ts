@@ -3,7 +3,7 @@ import pg from "pg";
 
 import { logger } from "../logger.js";
 
-import type { Database } from "./types-v2.js";
+import type { Database } from "./types.js";
 
 const { Pool, types } = pg;
 

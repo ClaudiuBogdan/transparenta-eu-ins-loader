@@ -1,7 +1,7 @@
 import { jsonb, textArray } from "../../../db/connection.js";
 import { logger } from "../../../logger.js";
 
-import type { Database, BilingualText } from "../../../db/types-v2.js";
+import type { Database, BilingualText } from "../../../db/types.js";
 import type { Kysely } from "kysely";
 
 // ============================================================================

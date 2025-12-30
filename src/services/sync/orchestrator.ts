@@ -9,7 +9,7 @@ import type {
   DimensionSummary,
   BilingualText,
   DimensionType,
-} from "../../db/types-v2.js";
+} from "../../db/types.js";
 import type {
   InsContext,
   InsMatrix,

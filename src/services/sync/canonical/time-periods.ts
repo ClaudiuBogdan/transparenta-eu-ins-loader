@@ -1,29 +1,25 @@
-import { logger } from "../../logger.js";
+import { jsonb } from "../../../db/connection.js";
+import { logger } from "../../../logger.js";
 
 import type {
   Database,
-  PeriodicityType,
-  NewTimePeriod,
-} from "../../db/types.js";
+  Periodicity,
+  BilingualText,
+} from "../../../db/types.js";
 import type { Kysely } from "kysely";
 
 // ============================================================================
 // Parsing Patterns
 // ============================================================================
 
-// Standard patterns
 const ANNUAL_PATTERN = /Anul\s+(\d{4})/i;
 const QUARTERLY_PATTERN = /Trimestrul\s+(I{1,3}V?|IV)\s+(\d{4})/i;
 const MONTHLY_PATTERN = /Luna\s+(\w+)\s+(\d{4})/i;
-
-// Additional patterns for flexibility
-const YEAR_ONLY_PATTERN = /^(\d{4})$/; // "2023"
-const SHORT_QUARTER_PATTERN = /^T([1-4])\s+(\d{4})$/i; // "T1 2024"
-const ALT_MONTHLY_PATTERN = /^(\w{3})\s+(\d{4})$/i; // "Ian 2024"
-const YEAR_RANGE_START_PATTERN = /^(\d{4})\s*[-–]\s*\d{4}$/; // "2020-2024" -> use start year
-const YEAR_RANGE_ANII_PATTERN = /^Ani+i?\s+(\d{4})\s*[-–]\s*(\d{4})$/i; // "Anii 1901 - 2000" -> use end year
-
-// Patterns for labels that are NOT time periods (return null)
+const YEAR_ONLY_PATTERN = /^(\d{4})$/;
+const SHORT_QUARTER_PATTERN = /^T([1-4])\s+(\d{4})$/i;
+const ALT_MONTHLY_PATTERN = /^(\w{3})\s+(\d{4})$/i;
+const YEAR_RANGE_START_PATTERN = /^(\d{4})\s*[-–]\s*\d{4}$/;
+const YEAR_RANGE_ANII_PATTERN = /^Ani+i?\s+(\d{4})\s*[-–]\s*(\d{4})$/i;
 const MONTH_ONLY_PATTERN =
   /^(Ianuarie|Februarie|Martie|Aprilie|Mai|Iunie|Iulie|August|Septembrie|Octombrie|Noiembrie|Decembrie)$/i;
 
@@ -42,6 +38,21 @@ const MONTHS_RO = [
   "Decembrie",
 ];
 
+const MONTHS_EN = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
 const MONTHS_RO_SHORT = [
   "Ian",
   "Feb",
@@ -57,12 +68,8 @@ const MONTHS_RO_SHORT = [
   "Dec",
 ];
 
-const QUARTER_MAP: Record<string, number> = {
-  I: 1,
-  II: 2,
-  III: 3,
-  IV: 4,
-};
+const QUARTER_MAP: Record<string, number> = { I: 1, II: 2, III: 3, IV: 4 };
+const QUARTER_NAMES_EN = ["Quarter 1", "Quarter 2", "Quarter 3", "Quarter 4"];
 
 // ============================================================================
 // Types
@@ -72,7 +79,7 @@ interface ParsedTimePeriod {
   year: number;
   quarter?: number;
   month?: number;
-  periodicity: PeriodicityType;
+  periodicity: Periodicity;
 }
 
 // ============================================================================
@@ -80,20 +87,30 @@ interface ParsedTimePeriod {
 // ============================================================================
 
 export class TimePeriodService {
+  private cache = new Map<string, number | null>();
+
   constructor(private db: Kysely<Database>) {}
 
   /**
    * Find or create a time period from an INS label
-   * Returns the time_period ID
    */
-  async findOrCreate(insLabel: string): Promise<number | null> {
-    const parsed = this.parseLabel(insLabel);
+  async findOrCreate(
+    labelRo: string,
+    labelEn?: string
+  ): Promise<number | null> {
+    const cacheKey = `time:${labelRo}`;
+    if (this.cache.has(cacheKey)) {
+      return this.cache.get(cacheKey) ?? null;
+    }
+
+    const parsed = this.parseLabel(labelRo);
     if (parsed === null) {
-      logger.warn({ insLabel }, "Could not parse time period label");
+      logger.warn({ labelRo }, "Could not parse time period label");
+      this.cache.set(cacheKey, null);
       return null;
     }
 
-    // Check for existing
+    // Check existing
     let query = this.db
       .selectFrom("time_periods")
       .select("id")
@@ -115,21 +132,22 @@ export class TimePeriodService {
     const existing = await query.executeTakeFirst();
 
     if (existing !== undefined) {
+      this.cache.set(cacheKey, existing.id);
       return existing.id;
     }
 
-    // Compute period start and end
+    // Compute period bounds and labels
     const { periodStart, periodEnd } = this.computePeriodBounds(parsed);
+    const labels = this.generateLabels(parsed, labelRo, labelEn);
 
-    // Insert new
-    const newPeriod: NewTimePeriod = {
+    const newPeriod = {
       year: parsed.year,
       quarter: parsed.quarter ?? null,
       month: parsed.month ?? null,
       periodicity: parsed.periodicity,
-      ins_label: insLabel.trim(),
       period_start: periodStart,
       period_end: periodEnd,
+      labels: jsonb(labels),
     };
 
     const result = await this.db
@@ -138,8 +156,12 @@ export class TimePeriodService {
       .returning("id")
       .executeTakeFirst();
 
-    logger.debug({ insLabel, parsed, id: result?.id }, "Created time period");
-    return result?.id ?? null;
+    const id = result?.id ?? null;
+    if (id) {
+      this.cache.set(cacheKey, id);
+      logger.debug({ labelRo, parsed, id }, "Created time period");
+    }
+    return id;
   }
 
   /**
@@ -148,20 +170,13 @@ export class TimePeriodService {
   parseLabel(label: string): ParsedTimePeriod | null {
     const trimmed = label.trim();
 
-    // Skip labels that are NOT time periods
-    if (MONTH_ONLY_PATTERN.test(trimmed)) {
-      // Month without year is ambiguous - not a valid time period
-      return null;
-    }
+    // Skip non-time-period labels
+    if (MONTH_ONLY_PATTERN.test(trimmed)) return null;
+    if (/^Total$/i.test(trimmed)) return null;
 
-    if (/^Total$/i.test(trimmed)) {
-      // "Total" is not a time period
-      return null;
-    }
-
-    // Year range with "Anii": "Anii 1901 - 2000" -> use end year
+    // Year range with "Anii": use end year
     const yearRangeAniiMatch = YEAR_RANGE_ANII_PATTERN.exec(trimmed);
-    if (yearRangeAniiMatch?.[2] !== undefined) {
+    if (yearRangeAniiMatch?.[2]) {
       return {
         year: Number.parseInt(yearRangeAniiMatch[2], 10),
         periodicity: "ANNUAL",
@@ -170,19 +185,18 @@ export class TimePeriodService {
 
     // Annual: "Anul 2023"
     const annualMatch = ANNUAL_PATTERN.exec(trimmed);
-    if (annualMatch?.[1] !== undefined) {
+    if (annualMatch?.[1]) {
       return {
         year: Number.parseInt(annualMatch[1], 10),
         periodicity: "ANNUAL",
       };
     }
 
-    // Quarterly: "Trimestrul I 2024", "Trimestrul IV 2023"
+    // Quarterly: "Trimestrul I 2024"
     const quarterlyMatch = QUARTERLY_PATTERN.exec(trimmed);
-    if (quarterlyMatch?.[1] !== undefined && quarterlyMatch[2] !== undefined) {
-      const quarterStr = quarterlyMatch[1];
-      const quarter = QUARTER_MAP[quarterStr];
-      if (quarter !== undefined) {
+    if (quarterlyMatch?.[1] && quarterlyMatch[2]) {
+      const quarter = QUARTER_MAP[quarterlyMatch[1]];
+      if (quarter) {
         return {
           year: Number.parseInt(quarterlyMatch[2], 10),
           quarter,
@@ -193,14 +207,15 @@ export class TimePeriodService {
 
     // Monthly: "Luna Ianuarie 2024"
     const monthlyMatch = MONTHLY_PATTERN.exec(trimmed);
-    if (monthlyMatch?.[1] !== undefined && monthlyMatch[2] !== undefined) {
+    if (monthlyMatch?.[1] && monthlyMatch[2]) {
       const monthName = monthlyMatch[1];
+      const yearStr = monthlyMatch[2];
       const monthIndex = MONTHS_RO.findIndex(
         (m) => m.toLowerCase() === monthName.toLowerCase()
       );
       if (monthIndex >= 0) {
         return {
-          year: Number.parseInt(monthlyMatch[2], 10),
+          year: Number.parseInt(yearStr, 10),
           month: monthIndex + 1,
           periodicity: "MONTHLY",
         };
@@ -209,19 +224,16 @@ export class TimePeriodService {
 
     // Year only: "2023"
     const yearOnlyMatch = YEAR_ONLY_PATTERN.exec(trimmed);
-    if (yearOnlyMatch?.[1] !== undefined) {
+    if (yearOnlyMatch?.[1]) {
       return {
         year: Number.parseInt(yearOnlyMatch[1], 10),
         periodicity: "ANNUAL",
       };
     }
 
-    // Short quarter: "T1 2024", "T2 2023"
+    // Short quarter: "T1 2024"
     const shortQuarterMatch = SHORT_QUARTER_PATTERN.exec(trimmed);
-    if (
-      shortQuarterMatch?.[1] !== undefined &&
-      shortQuarterMatch[2] !== undefined
-    ) {
+    if (shortQuarterMatch?.[1] && shortQuarterMatch[2]) {
       return {
         year: Number.parseInt(shortQuarterMatch[2], 10),
         quarter: Number.parseInt(shortQuarterMatch[1], 10),
@@ -229,28 +241,26 @@ export class TimePeriodService {
       };
     }
 
-    // Alternative monthly: "Ian 2024", "Feb 2023"
+    // Alternative monthly: "Ian 2024"
     const altMonthlyMatch = ALT_MONTHLY_PATTERN.exec(trimmed);
-    if (
-      altMonthlyMatch?.[1] !== undefined &&
-      altMonthlyMatch[2] !== undefined
-    ) {
+    if (altMonthlyMatch?.[1] && altMonthlyMatch[2]) {
       const monthName = altMonthlyMatch[1];
+      const yearStr = altMonthlyMatch[2];
       const monthIndex = MONTHS_RO_SHORT.findIndex(
         (m) => m.toLowerCase() === monthName.toLowerCase()
       );
       if (monthIndex >= 0) {
         return {
-          year: Number.parseInt(altMonthlyMatch[2], 10),
+          year: Number.parseInt(yearStr, 10),
           month: monthIndex + 1,
           periodicity: "MONTHLY",
         };
       }
     }
 
-    // Year range: "2020-2024" -> use start year as annual
+    // Year range: "2020-2024" -> use start year
     const yearRangeMatch = YEAR_RANGE_START_PATTERN.exec(trimmed);
-    if (yearRangeMatch?.[1] !== undefined) {
+    if (yearRangeMatch?.[1]) {
       return {
         year: Number.parseInt(yearRangeMatch[1], 10),
         periodicity: "ANNUAL",
@@ -261,7 +271,8 @@ export class TimePeriodService {
   }
 
   /**
-   * Compute period start and end dates
+   * Compute period bounds using UTC to avoid timezone issues
+   * FIX: Using Date.UTC() ensures dates are consistent regardless of server timezone
    */
   private computePeriodBounds(parsed: ParsedTimePeriod): {
     periodStart: Date;
@@ -271,43 +282,70 @@ export class TimePeriodService {
 
     if (parsed.periodicity === "ANNUAL") {
       return {
-        periodStart: new Date(year, 0, 1), // January 1
-        periodEnd: new Date(year, 11, 31), // December 31
+        periodStart: new Date(Date.UTC(year, 0, 1)),
+        periodEnd: new Date(Date.UTC(year, 11, 31)),
       };
     }
 
     if (parsed.periodicity === "QUARTERLY" && parsed.quarter != null) {
-      const quarterStartMonth = (parsed.quarter - 1) * 3;
-      const quarterEndMonth = quarterStartMonth + 2;
-      const lastDay = new Date(year, quarterEndMonth + 1, 0).getDate();
-
+      const startMonth = (parsed.quarter - 1) * 3;
+      const endMonth = startMonth + 2;
+      // Get last day of quarter using UTC
+      const lastDay = new Date(Date.UTC(year, endMonth + 1, 0)).getUTCDate();
       return {
-        periodStart: new Date(year, quarterStartMonth, 1),
-        periodEnd: new Date(year, quarterEndMonth, lastDay),
+        periodStart: new Date(Date.UTC(year, startMonth, 1)),
+        periodEnd: new Date(Date.UTC(year, endMonth, lastDay)),
       };
     }
 
     if (parsed.periodicity === "MONTHLY" && parsed.month != null) {
       const monthIndex = parsed.month - 1;
-      const lastDay = new Date(year, monthIndex + 1, 0).getDate();
-
+      // Get last day of month using UTC
+      const lastDay = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
       return {
-        periodStart: new Date(year, monthIndex, 1),
-        periodEnd: new Date(year, monthIndex, lastDay),
+        periodStart: new Date(Date.UTC(year, monthIndex, 1)),
+        periodEnd: new Date(Date.UTC(year, monthIndex, lastDay)),
       };
     }
 
-    // Fallback (should not happen)
     return {
-      periodStart: new Date(year, 0, 1),
-      periodEnd: new Date(year, 11, 31),
+      periodStart: new Date(Date.UTC(year, 0, 1)),
+      periodEnd: new Date(Date.UTC(year, 11, 31)),
     };
   }
 
-  /**
-   * Check if a label is a time period
-   */
+  private generateLabels(
+    parsed: ParsedTimePeriod,
+    labelRo: string,
+    labelEn?: string
+  ): BilingualText {
+    const ro = labelRo.trim();
+    let en: string | undefined = labelEn?.trim();
+
+    // Generate English label if not provided
+    if (!en) {
+      if (parsed.periodicity === "ANNUAL") {
+        en = `Year ${String(parsed.year)}`;
+      } else if (parsed.periodicity === "QUARTERLY" && parsed.quarter) {
+        const quarterName =
+          QUARTER_NAMES_EN[parsed.quarter - 1] ??
+          `Quarter ${String(parsed.quarter)}`;
+        en = `${quarterName} ${String(parsed.year)}`;
+      } else if (parsed.periodicity === "MONTHLY" && parsed.month) {
+        const monthName =
+          MONTHS_EN[parsed.month - 1] ?? `Month ${String(parsed.month)}`;
+        en = `${monthName} ${String(parsed.year)}`;
+      }
+    }
+
+    return { ro, en };
+  }
+
   isTimePeriodLabel(label: string): boolean {
     return this.parseLabel(label) !== null;
+  }
+
+  clearCache(): void {
+    this.cache.clear();
   }
 }

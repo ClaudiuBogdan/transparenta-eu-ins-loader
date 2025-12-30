@@ -1,6 +1,5 @@
 /**
  * Time Period Routes - /api/v1/time-periods
- * Updated for V2 schema with JSONB labels
  */
 
 import { Type, type Static } from "@sinclair/typebox";

@@ -4,7 +4,7 @@ import { TimePeriodService } from "./time-periods.js";
 import { UnitService } from "./units.js";
 import { logger } from "../../../logger.js";
 
-import type { Database, NewLabelMapping } from "../../../db/types-v2.js";
+import type { Database, NewLabelMapping } from "../../../db/types.js";
 import type { Kysely } from "kysely";
 
 // ============================================================================

@@ -1,6 +1,5 @@
 /**
  * Statistics Routes - /api/v1/statistics
- * Updated for V2 schema with JSONB metadata
  *
  * ## Default Behavior
  *

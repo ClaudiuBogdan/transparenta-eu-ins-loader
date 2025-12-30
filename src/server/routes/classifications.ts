@@ -1,6 +1,5 @@
 /**
  * Classification Routes - /api/v1/classifications
- * Updated for V2 schema with JSONB names
  */
 
 import { Type, type Static } from "@sinclair/typebox";

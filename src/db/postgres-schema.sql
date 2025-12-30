@@ -104,13 +104,13 @@ CREATE TABLE territories (
     -- Identification
     code VARCHAR(20) NOT NULL,
     siruta_code VARCHAR(6),
-    name VARCHAR(200) NOT NULL,
-    name_normalized VARCHAR(200) NOT NULL,
+    name TEXT NOT NULL,
+    name_normalized TEXT NOT NULL,
 
     -- Hierarchy
     level territorial_level NOT NULL,
     parent_id INTEGER REFERENCES territories(id) ON DELETE CASCADE,
-    path VARCHAR(500) NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
 
     -- SIRUTA metadata (for LAU level)
     siruta_tip SMALLINT,
@@ -155,7 +155,7 @@ CREATE TABLE time_periods (
     periodicity periodicity_type NOT NULL,
 
     -- Display and API compatibility
-    ins_label VARCHAR(50) NOT NULL,
+    ins_label TEXT NOT NULL,
 
     -- Date representation for ordering and filtering
     period_start DATE NOT NULL,
@@ -193,11 +193,11 @@ CREATE TABLE classification_types (
     id SERIAL PRIMARY KEY,
 
     -- Identification
-    code VARCHAR(50) NOT NULL,
-    name VARCHAR(200) NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
 
     -- INS mapping
-    ins_labels VARCHAR(200)[] NOT NULL DEFAULT '{}',
+    ins_labels TEXT[] NOT NULL DEFAULT '{}',
 
     -- Structure
     is_hierarchical BOOLEAN NOT NULL DEFAULT FALSE,
@@ -224,13 +224,13 @@ CREATE TABLE classification_values (
     classification_type_id INTEGER NOT NULL REFERENCES classification_types(id) ON DELETE CASCADE,
 
     -- Value identification
-    code VARCHAR(50) NOT NULL,
-    name VARCHAR(200) NOT NULL,
-    name_normalized VARCHAR(200) NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    name_normalized TEXT NOT NULL,
 
     -- Hierarchy (for hierarchical classifications like CAEN, age groups)
     parent_id INTEGER REFERENCES classification_values(id) ON DELETE CASCADE,
-    path VARCHAR(500),
+    path TEXT,
     level SMALLINT NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0,
 
@@ -260,8 +260,8 @@ CREATE TABLE units_of_measure (
     id SERIAL PRIMARY KEY,
 
     -- Identification
-    code VARCHAR(50) NOT NULL,
-    name VARCHAR(100) NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
     symbol VARCHAR(20),
 
     -- INS mapping
@@ -371,7 +371,7 @@ CREATE TABLE matrix_data_sources (
 
     name TEXT NOT NULL,
     name_en TEXT,  -- English translation from INS API
-    source_type VARCHAR(50),
+    source_type TEXT,
     link_number INTEGER,
     source_code INTEGER,
 
@@ -393,8 +393,8 @@ CREATE TABLE matrix_dimensions (
 
     -- INS API fields
     dim_code SMALLINT NOT NULL,
-    label VARCHAR(200) NOT NULL,
-    label_en VARCHAR(200),  -- English translation from INS API
+    label TEXT NOT NULL,
+    label_en TEXT,  -- English translation from INS API
 
     -- Type classification
     dimension_type dimension_type NOT NULL,

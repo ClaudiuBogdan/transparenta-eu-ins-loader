@@ -26,7 +26,7 @@ import type { Kysely } from "kysely";
  * Without this fix, 90 localities in POP107D were not matched and fell through to
  * county name matching, which either failed or incorrectly mapped them.
  */
-const SIRUTA_PATTERN = /^(\d{4,6})\s+(.+)$/;
+export const SIRUTA_PATTERN = /^(\d{4,6})\s+(.+)$/;
 
 // ============================================================================
 // Static NUTS Hierarchy Data
@@ -44,7 +44,7 @@ interface RegionData {
   counties: string[];
 }
 
-interface CountyData {
+export interface CountyData {
   code: string;
   name: string;
 }
@@ -107,7 +107,15 @@ const REGIONS: RegionData[] = [
   },
 ];
 
-const COUNTIES: CountyData[] = [
+/**
+ * Regions sorted by name length (longest first).
+ * This ensures "Sud-Vest Oltenia" matches before "Sud - Muntenia" or just "Vest".
+ */
+const REGIONS_SORTED = [...REGIONS].sort(
+  (a, b) => b.name.length - a.name.length
+);
+
+export const COUNTIES: CountyData[] = [
   { code: "AB", name: "Alba" },
   { code: "AR", name: "Arad" },
   { code: "AG", name: "Arges" },
@@ -168,7 +176,7 @@ const COUNTIES: CountyData[] = [
 // Solution: Use range-based lookup that considers the numeric value of the code.
 // ============================================================================
 
-interface SirutaRange {
+export interface SirutaRange {
   min: number;
   max: number;
   county: string;
@@ -182,8 +190,28 @@ interface SirutaRange {
  * truncating leading zeros (e.g., 009262 becomes 9262).
  *
  * Source: Romanian National Institute of Statistics (INS) SIRUTA classification
+ *
+ * TODO: Known issues to fix:
+ *
+ * 1. Gap at 19000-19999: There's an unassigned range between Arges (13000-18999)
+ *    and Bacau (20000-25999). This might be reserved or there may be localities
+ *    we're missing. Needs validation against official SIRUTA classification.
+ *
+ * 2. Bucharest sectors overlap with Salaj: The Bucharest sector codes
+ *    (179132-179187) fall within the Salaj range (179000-183999). The current
+ *    implementation relies on specific Bucharest codes being listed first,
+ *    but this is fragile and should be made more robust.
+ *
+ * 3. Incomplete Bucharest coverage: Only 6 Bucharest sector codes are mapped
+ *    (179132, 179141, 179150, 179169, 179178, 179187). There may be other
+ *    Bucharest localities in the INS data that are not covered.
+ *
+ * 4. Consider adding validation: A helper function could validate SIRUTA codes
+ *    against the official SIRUTA database to catch edge cases.
+ *
+ * Reference: https://ro.wikipedia.org/wiki/SIRUTA
  */
-const SIRUTA_RANGES: SirutaRange[] = [
+export const SIRUTA_RANGES: SirutaRange[] = [
   // Alba (01) - codes 1xxx-8xxx (originally 001xxx-008xxx)
   { min: 1000, max: 8999, county: "AB" },
 
@@ -396,6 +424,39 @@ export class TerritoryService {
    */
   async findOrCreateFromLabel(label: string): Promise<number | null> {
     const trimmed = label.trim();
+    const normalizedLower = trimmed.toLowerCase();
+
+    // =========================================================================
+    // SPECIAL CASES: Handle special patterns that don't fit standard hierarchy
+    // =========================================================================
+
+    // "Extra-regiuni" - not a valid territory, return null
+    if (normalizedLower === "extra-regiuni") {
+      return null;
+    }
+
+    // Multi-county aggregates (e.g., "Dolj, Mehedinti, Olt") - return null
+    // These contain multiple counties separated by commas
+    if (trimmed.includes(",") && /[A-Z][a-z]+,\s*[A-Z][a-z]+/.test(trimmed)) {
+      return null;
+    }
+
+    // "Mun. Bucuresti -incl. SAI" and similar Bucharest patterns
+    if (
+      normalizedLower.includes("bucuresti") &&
+      (normalizedLower.includes("sai") || normalizedLower.includes("incl"))
+    ) {
+      const bucharest = await this.db
+        .selectFrom("territories")
+        .select("id")
+        .where("code", "=", "B")
+        .executeTakeFirst();
+      return bucharest?.id ?? null;
+    }
+
+    // =========================================================================
+    // STANDARD PATTERNS
+    // =========================================================================
 
     // Check for SIRUTA pattern: "38731 Ripiceni"
     const sirutaMatch = SIRUTA_PATTERN.exec(trimmed);
@@ -404,8 +465,8 @@ export class TerritoryService {
       return this.findOrCreateLocality(sirutaCode, name);
     }
 
-    // Check for TOTAL (national)
-    if (/^TOTAL$/i.test(trimmed)) {
+    // Check for TOTAL or "Nivel National" (national)
+    if (/^TOTAL$/i.test(trimmed) || normalizedLower === "nivel national") {
       const national = await this.db
         .selectFrom("territories")
         .select("id")
@@ -435,13 +496,37 @@ export class TerritoryService {
     }
 
     // Check for region (by normalized name match)
-    // Normalize: remove spaces around hyphens, lowercase
-    const normalizedLabel = trimmed.toLowerCase().replaceAll(/\s*-\s*/g, "-");
-    for (const region of REGIONS) {
+    // Use REGIONS_SORTED (longest first) to prevent false positives
+    // e.g., "Sud-Vest Oltenia" should match before "Vest"
+    //
+    // Normalize: collapse multiple spaces/hyphens, convert to lowercase
+    // This handles variations like "Regiunea Sud -Vest - Oltenia" (extra hyphen)
+    const normalizedLabel = trimmed
+      .toLowerCase()
+      .replaceAll(/[\s-]+/g, " ") // Collapse spaces and hyphens to single space
+      .trim();
+
+    for (const region of REGIONS_SORTED) {
       const normalizedRegionName = region.name
         .toLowerCase()
-        .replaceAll(/\s*-\s*/g, "-");
-      if (normalizedLabel.includes(normalizedRegionName)) {
+        .replaceAll(/[\s-]+/g, " ") // Same normalization
+        .trim();
+
+      // Use flexible pattern that allows spaces or hyphens between words
+      // This matches: "sud vest oltenia", "sud-vest oltenia", "sud - vest - oltenia"
+      const regionPatternStr = normalizedRegionName
+        .split(" ")
+        .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("[\\s-]+");
+      const regionPattern = new RegExp(
+        `(?:^|regiunea\\s+|\\s)${regionPatternStr}(?:\\s|$)`,
+        "i"
+      );
+
+      if (
+        normalizedLabel.includes(normalizedRegionName) ||
+        regionPattern.test(normalizedLabel)
+      ) {
         const reg = await this.db
           .selectFrom("territories")
           .select("id")

@@ -79,6 +79,9 @@ export function registerSyncCommand(program: Command): void {
     .action(async (options: { full?: boolean; code?: string }) => {
       const spinner = ora("Syncing matrices...").start();
 
+      // Track failures for summary
+      const failures: { code: string; error: string }[] = [];
+
       try {
         const service = new MatrixSyncService(db);
 
@@ -110,9 +113,9 @@ export function registerSyncCommand(program: Command): void {
                 await service.syncMatrixDetails(m.ins_code);
                 completed++;
               } catch (error) {
-                console.error(
-                  `\nFailed to sync ${m.ins_code}: ${(error as Error).message}`
-                );
+                const errorMsg = (error as Error).message;
+                failures.push({ code: m.ins_code, error: errorMsg });
+                // Don't log inline, we'll show summary at the end
               }
               await sleep(750); // Rate limit
             }
@@ -120,6 +123,23 @@ export function registerSyncCommand(program: Command): void {
             spinner.succeed(
               `Metadata synced for ${String(completed)}/${String(total)} matrices`
             );
+
+            // Print summary at the end
+            if (failures.length > 0) {
+              console.log("\n" + "═".repeat(80));
+              console.log("SYNC SUMMARY");
+              console.log("═".repeat(80));
+              console.log(`\n✓ Succeeded: ${String(completed)}`);
+              console.log(`✗ Failed: ${String(failures.length)}`);
+
+              console.log("\n" + "─".repeat(80));
+              console.log("FAILURES:");
+              console.log("─".repeat(80));
+              for (const f of failures) {
+                console.log(`  ${f.code}: ${f.error}`);
+              }
+              console.log("─".repeat(80));
+            }
           }
         }
       } catch (error) {

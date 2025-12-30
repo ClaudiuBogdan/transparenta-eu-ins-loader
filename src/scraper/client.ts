@@ -16,10 +16,21 @@ const RATE_LIMIT_MS = 750; // 0.75 seconds between requests
 export type Locale = "ro" | "en";
 
 let lastRequestTime = 0;
+const MAX_RETRIES = 3;
 
+/**
+ * Fetch with rate limiting and retry logic for 429 responses.
+ *
+ * Features:
+ * - Enforces minimum delay between requests (RATE_LIMIT_MS)
+ * - Handles HTTP 429 (Too Many Requests) with exponential backoff
+ * - Respects Retry-After header when present
+ * - Maximum 3 retries before throwing
+ */
 async function rateLimitedFetch(
   url: string,
-  options?: RequestInit
+  options?: RequestInit,
+  retryCount = 0
 ): Promise<Response> {
   const now = Date.now();
   const elapsed = now - lastRequestTime;
@@ -33,7 +44,7 @@ async function rateLimitedFetch(
   lastRequestTime = Date.now();
 
   const method = options?.method ?? "GET";
-  apiLogger.debug({ method, url }, "Sending request to INS API");
+  apiLogger.debug({ method, url, retryCount }, "Sending request to INS API");
 
   const startTime = performance.now();
   const response = await fetch(url, options);
@@ -49,6 +60,40 @@ async function rateLimitedFetch(
     },
     "Received response from INS API"
   );
+
+  // Handle rate limiting (429 Too Many Requests)
+  if (response.status === 429) {
+    if (retryCount >= MAX_RETRIES) {
+      apiLogger.error(
+        { url, retryCount },
+        "Rate limited after maximum retries"
+      );
+      throw new Error(
+        `Rate limited after ${String(MAX_RETRIES)} retries: ${url}`
+      );
+    }
+
+    // Check for Retry-After header, otherwise use exponential backoff
+    const retryAfterHeader = response.headers.get("Retry-After");
+    let waitMs: number;
+
+    if (retryAfterHeader) {
+      // Retry-After can be seconds or HTTP date
+      const seconds = Number.parseInt(retryAfterHeader, 10);
+      waitMs = Number.isNaN(seconds) ? RATE_LIMIT_MS * 4 : seconds * 1000;
+    } else {
+      // Exponential backoff: 1.5s, 3s, 6s
+      waitMs = RATE_LIMIT_MS * Math.pow(2, retryCount + 1);
+    }
+
+    apiLogger.warn(
+      { url, retryCount, waitMs },
+      "Rate limited (429) - retrying after delay"
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return rateLimitedFetch(url, options, retryCount + 1);
+  }
 
   return response;
 }

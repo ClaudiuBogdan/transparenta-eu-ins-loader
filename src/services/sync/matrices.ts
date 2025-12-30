@@ -19,6 +19,7 @@ import type {
 } from "../../db/types.js";
 import type {
   InsMatrix,
+  InsMatrixDetails,
   InsDimension,
   InsDataSource,
 } from "../../types/index.js";
@@ -294,19 +295,30 @@ export class MatrixSyncService {
 
   /**
    * Sync data sources for a matrix (bilingual)
+   * Uses upsert to handle duplicates gracefully
    */
   private async syncDataSources(
     matrixId: number,
     dataSources: InsDataSource[],
     enNameMap: Map<number, string>
   ): Promise<void> {
+    // Deduplicate by linkNumber (INS API may return duplicates)
+    const seenLinkNumbers = new Set<number>();
+    const uniqueDataSources = dataSources.filter((ds) => {
+      if (seenLinkNumbers.has(ds.linkNumber)) {
+        return false;
+      }
+      seenLinkNumbers.add(ds.linkNumber);
+      return true;
+    });
+
     // Clear existing data sources
     await this.db
       .deleteFrom("matrix_data_sources")
       .where("matrix_id", "=", matrixId)
       .execute();
 
-    for (const ds of dataSources) {
+    for (const ds of uniqueDataSources) {
       const nameEn = enNameMap.get(ds.linkNumber) ?? null;
 
       await this.db
@@ -319,6 +331,14 @@ export class MatrixSyncService {
           link_number: ds.linkNumber,
           source_code: ds.codTip,
         })
+        .onConflict((oc) =>
+          oc.columns(["matrix_id", "link_number"]).doUpdateSet({
+            name: ds.nume,
+            name_en: nameEn,
+            source_type: ds.tip || null,
+            source_code: ds.codTip,
+          })
+        )
         .execute();
     }
   }
@@ -339,8 +359,8 @@ export class MatrixSyncService {
       .execute();
 
     for (const dim of metadata.dimensionsMap) {
-      // Detect dimension type
-      const dimType = this.detectDimensionType(dim);
+      // Detect dimension type using INS API metadata
+      const dimType = this.detectDimensionType(dim, metadata.details);
       let classificationTypeId: number | null = null;
 
       if (dimType === "CLASSIFICATION") {
@@ -458,9 +478,50 @@ export class MatrixSyncService {
   }
 
   /**
-   * Detect dimension type from dimension metadata
+   * Detect dimension type using INS API metadata when available.
+   * Falls back to pattern matching for dimensions not in metadata.
+   *
+   * @param dim - The dimension to classify
+   * @param details - Optional INS matrix details with dimension indices
    */
-  detectDimensionType(dim: InsDimension): DimensionType {
+  detectDimensionType(
+    dim: InsDimension,
+    details?: InsMatrixDetails
+  ): DimensionType {
+    // Use metadata if available - dimension indices are 1-based
+    if (details) {
+      const dimIndex = dim.dimCode; // dimCode is 1-based dimension index
+
+      // Time dimension
+      if (details.matTime > 0 && dimIndex === details.matTime) {
+        return "TEMPORAL";
+      }
+
+      // County (NUTS3) dimension
+      if (details.nomJud > 0 && dimIndex === details.nomJud) {
+        return "TERRITORIAL";
+      }
+
+      // Locality (LAU) dimension
+      if (details.nomLoc > 0 && dimIndex === details.nomLoc) {
+        return "TERRITORIAL";
+      }
+
+      // Regional dimension
+      if (details.matRegJ > 0 && dimIndex === details.matRegJ) {
+        return "TERRITORIAL";
+      }
+    }
+
+    // Fall back to pattern matching
+    return this.detectDimensionTypeByPattern(dim);
+  }
+
+  /**
+   * Detect dimension type using label pattern matching.
+   * Used as fallback when metadata doesn't identify the dimension.
+   */
+  private detectDimensionTypeByPattern(dim: InsDimension): DimensionType {
     const label = dim.label.toLowerCase();
 
     // Temporal patterns
@@ -480,6 +541,43 @@ export class MatrixSyncService {
 
     // Default to classification
     return "CLASSIFICATION";
+  }
+
+  /**
+   * Get territorial dimension info for chunking decisions.
+   * Identifies county (NUTS3) and locality (LAU) dimensions separately.
+   * Uses INS API metadata when available for more accurate detection.
+   */
+  getTerritorialDimensionInfo(matrix: InsMatrix): {
+    countyDim: InsDimension | null;
+    localityDim: InsDimension | null;
+  } {
+    const details = matrix.details;
+
+    // Use metadata to identify specific territorial dimensions
+    let countyDim: InsDimension | null = null;
+    let localityDim: InsDimension | null = null;
+
+    // County dimension from metadata (nomJud is 1-based index)
+    if (details.nomJud > 0) {
+      countyDim =
+        matrix.dimensionsMap.find((d) => d.dimCode === details.nomJud) ?? null;
+    }
+
+    // Locality dimension from metadata (nomLoc is 1-based index)
+    if (details.nomLoc > 0) {
+      localityDim =
+        matrix.dimensionsMap.find((d) => d.dimCode === details.nomLoc) ?? null;
+    }
+
+    // Fallback to pattern matching if metadata didn't identify them
+    countyDim ??=
+      matrix.dimensionsMap.find((d) => /judete/i.test(d.label)) ?? null;
+
+    localityDim ??=
+      matrix.dimensionsMap.find((d) => /localitati/i.test(d.label)) ?? null;
+
+    return { countyDim, localityDim };
   }
 
   /**

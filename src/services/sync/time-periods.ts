@@ -11,9 +11,21 @@ import type { Kysely } from "kysely";
 // Parsing Patterns
 // ============================================================================
 
+// Standard patterns
 const ANNUAL_PATTERN = /Anul\s+(\d{4})/i;
 const QUARTERLY_PATTERN = /Trimestrul\s+(I{1,3}V?|IV)\s+(\d{4})/i;
 const MONTHLY_PATTERN = /Luna\s+(\w+)\s+(\d{4})/i;
+
+// Additional patterns for flexibility
+const YEAR_ONLY_PATTERN = /^(\d{4})$/; // "2023"
+const SHORT_QUARTER_PATTERN = /^T([1-4])\s+(\d{4})$/i; // "T1 2024"
+const ALT_MONTHLY_PATTERN = /^(\w{3})\s+(\d{4})$/i; // "Ian 2024"
+const YEAR_RANGE_START_PATTERN = /^(\d{4})\s*[-–]\s*\d{4}$/; // "2020-2024" -> use start year
+const YEAR_RANGE_ANII_PATTERN = /^Ani+i?\s+(\d{4})\s*[-–]\s*(\d{4})$/i; // "Anii 1901 - 2000" -> use end year
+
+// Patterns for labels that are NOT time periods (return null)
+const MONTH_ONLY_PATTERN =
+  /^(Ianuarie|Februarie|Martie|Aprilie|Mai|Iunie|Iulie|August|Septembrie|Octombrie|Noiembrie|Decembrie)$/i;
 
 const MONTHS_RO = [
   "Ianuarie",
@@ -28,6 +40,21 @@ const MONTHS_RO = [
   "Octombrie",
   "Noiembrie",
   "Decembrie",
+];
+
+const MONTHS_RO_SHORT = [
+  "Ian",
+  "Feb",
+  "Mar",
+  "Apr",
+  "Mai",
+  "Iun",
+  "Iul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
 ];
 
 const QUARTER_MAP: Record<string, number> = {
@@ -121,6 +148,26 @@ export class TimePeriodService {
   parseLabel(label: string): ParsedTimePeriod | null {
     const trimmed = label.trim();
 
+    // Skip labels that are NOT time periods
+    if (MONTH_ONLY_PATTERN.test(trimmed)) {
+      // Month without year is ambiguous - not a valid time period
+      return null;
+    }
+
+    if (/^Total$/i.test(trimmed)) {
+      // "Total" is not a time period
+      return null;
+    }
+
+    // Year range with "Anii": "Anii 1901 - 2000" -> use end year
+    const yearRangeAniiMatch = YEAR_RANGE_ANII_PATTERN.exec(trimmed);
+    if (yearRangeAniiMatch?.[2] !== undefined) {
+      return {
+        year: Number.parseInt(yearRangeAniiMatch[2], 10),
+        periodicity: "ANNUAL",
+      };
+    }
+
     // Annual: "Anul 2023"
     const annualMatch = ANNUAL_PATTERN.exec(trimmed);
     if (annualMatch?.[1] !== undefined) {
@@ -158,6 +205,56 @@ export class TimePeriodService {
           periodicity: "MONTHLY",
         };
       }
+    }
+
+    // Year only: "2023"
+    const yearOnlyMatch = YEAR_ONLY_PATTERN.exec(trimmed);
+    if (yearOnlyMatch?.[1] !== undefined) {
+      return {
+        year: Number.parseInt(yearOnlyMatch[1], 10),
+        periodicity: "ANNUAL",
+      };
+    }
+
+    // Short quarter: "T1 2024", "T2 2023"
+    const shortQuarterMatch = SHORT_QUARTER_PATTERN.exec(trimmed);
+    if (
+      shortQuarterMatch?.[1] !== undefined &&
+      shortQuarterMatch[2] !== undefined
+    ) {
+      return {
+        year: Number.parseInt(shortQuarterMatch[2], 10),
+        quarter: Number.parseInt(shortQuarterMatch[1], 10),
+        periodicity: "QUARTERLY",
+      };
+    }
+
+    // Alternative monthly: "Ian 2024", "Feb 2023"
+    const altMonthlyMatch = ALT_MONTHLY_PATTERN.exec(trimmed);
+    if (
+      altMonthlyMatch?.[1] !== undefined &&
+      altMonthlyMatch[2] !== undefined
+    ) {
+      const monthName = altMonthlyMatch[1];
+      const monthIndex = MONTHS_RO_SHORT.findIndex(
+        (m) => m.toLowerCase() === monthName.toLowerCase()
+      );
+      if (monthIndex >= 0) {
+        return {
+          year: Number.parseInt(altMonthlyMatch[2], 10),
+          month: monthIndex + 1,
+          periodicity: "MONTHLY",
+        };
+      }
+    }
+
+    // Year range: "2020-2024" -> use start year as annual
+    const yearRangeMatch = YEAR_RANGE_START_PATTERN.exec(trimmed);
+    if (yearRangeMatch?.[1] !== undefined) {
+      return {
+        year: Number.parseInt(yearRangeMatch[1], 10),
+        periodicity: "ANNUAL",
+      };
     }
 
     return null;

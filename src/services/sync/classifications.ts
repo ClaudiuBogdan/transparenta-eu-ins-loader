@@ -177,7 +177,15 @@ export class ClassificationService {
   }
 
   /**
-   * Find or create a classification value
+   * Find or create a classification value.
+   * Handles code collisions by adding numeric suffixes when different labels
+   * generate the same code.
+   *
+   * Strategy:
+   * 1. First look up by normalized name (most reliable - catches truncated matches)
+   * 2. Then check for code collision
+   * 3. Use ON CONFLICT as safety net
+   *
    * Returns the classification_value ID
    */
   async findOrCreateValue(
@@ -189,22 +197,41 @@ export class ClassificationService {
     const code = this.generateValueCode(label);
     const normalized = this.normalize(label);
 
-    // Check if exists
-    const existing = await this.db
+    // First, check for existing by normalized name (more reliable than code)
+    // This catches cases where truncated name_normalized in DB matches full name
+    const existingByName = await this.db
       .selectFrom("classification_values")
       .select("id")
+      .where("classification_type_id", "=", typeId)
+      .where("name_normalized", "=", normalized)
+      .executeTakeFirst();
+
+    if (existingByName) {
+      return existingByName.id;
+    }
+
+    // Check for code collision
+    const existingByCode = await this.db
+      .selectFrom("classification_values")
+      .select(["id", "name_normalized"])
       .where("classification_type_id", "=", typeId)
       .where("code", "=", code)
       .executeTakeFirst();
 
-    if (existing) {
-      return existing.id;
+    let finalCode = code;
+    if (existingByCode) {
+      // Code exists with different name - generate unique code
+      finalCode = await this.generateUniqueCode(typeId, code);
+      logger.warn(
+        { typeId, originalCode: code, newCode: finalCode, normalized },
+        "Classification code collision - using suffix"
+      );
     }
 
-    // Create new
+    // Insert with conflict handling as safety net
     const newValue: NewClassificationValue = {
       classification_type_id: typeId,
-      code,
+      code: finalCode,
       name: label.trim(),
       name_normalized: normalized,
       parent_id: parentId,
@@ -215,11 +242,55 @@ export class ClassificationService {
     const result = await this.db
       .insertInto("classification_values")
       .values(newValue)
+      .onConflict((oc) =>
+        oc.columns(["classification_type_id", "code"]).doUpdateSet({
+          name: label.trim(),
+          name_normalized: normalized,
+        })
+      )
       .returning("id")
       .executeTakeFirst();
 
-    logger.debug({ typeId, code, label }, "Created classification value");
+    logger.debug(
+      { typeId, code: finalCode, label },
+      "Created classification value"
+    );
     return result!.id;
+  }
+
+  /**
+   * Generate a unique code by finding the next available suffix.
+   */
+  private async generateUniqueCode(
+    typeId: number,
+    baseCode: string
+  ): Promise<string> {
+    // Check all entries with this base code pattern
+    const pattern = `${baseCode}%`;
+    const existingCodes = await this.db
+      .selectFrom("classification_values")
+      .select("code")
+      .where("classification_type_id", "=", typeId)
+      .where("code", "like", pattern)
+      .execute();
+
+    // Find the next available suffix
+    const usedSuffixes = new Set<number>();
+    const suffixPattern = new RegExp(`^${baseCode}_(\\d+)$`);
+
+    for (const entry of existingCodes) {
+      const match = suffixPattern.exec(entry.code);
+      if (match?.[1]) {
+        usedSuffixes.add(Number.parseInt(match[1], 10));
+      }
+    }
+
+    let suffix = 2;
+    while (usedSuffixes.has(suffix)) {
+      suffix++;
+    }
+
+    return `${baseCode}_${String(suffix)}`;
   }
 
   /**
@@ -229,8 +300,7 @@ export class ClassificationService {
     // Remove diacritics and special chars, uppercase, underscores
     return this.normalize(label)
       .replaceAll(/\s+/g, "_")
-      .replaceAll(/[^\dA-Z_]/g, "")
-      .slice(0, 50);
+      .replaceAll(/[^\dA-Z_]/g, "");
   }
 
   /**
@@ -249,8 +319,7 @@ export class ClassificationService {
     // Otherwise, generate from label
     return this.normalize(trimmed)
       .replaceAll(/\s+/g, "_")
-      .replaceAll(/[^\dA-Z_]/g, "")
-      .slice(0, 50);
+      .replaceAll(/[^\dA-Z_]/g, "");
   }
 
   /**

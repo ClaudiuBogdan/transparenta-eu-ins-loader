@@ -1,11 +1,42 @@
-import { Kysely, PostgresDialect } from "kysely";
+import { Kysely, PostgresDialect, sql, type RawBuilder } from "kysely";
 import pg from "pg";
 
 import { logger } from "../logger.js";
 
-import type { Database } from "./types.js";
+import type { Database } from "./types-v2.js";
 
-const { Pool } = pg;
+const { Pool, types } = pg;
+
+// Configure pg to parse JSON/JSONB as objects instead of strings
+types.setTypeParser(
+  types.builtins.JSON,
+  (val: string) => JSON.parse(val) as unknown
+);
+types.setTypeParser(
+  types.builtins.JSONB,
+  (val: string) => JSON.parse(val) as unknown
+);
+
+/**
+ * Helper to convert JavaScript objects to JSONB SQL expressions for Kysely inserts/updates.
+ * This is needed because Kysely doesn't automatically serialize objects to JSON for PostgreSQL.
+ */
+export function jsonb<T>(value: T): RawBuilder<T> {
+  return sql<T>`${JSON.stringify(value)}::jsonb`;
+}
+
+/**
+ * Helper to convert JavaScript string arrays to PostgreSQL TEXT[] expressions.
+ * This is needed because Kysely doesn't automatically handle array types.
+ */
+export function textArray(values: string[]): RawBuilder<string[]> {
+  if (values.length === 0) {
+    return sql<string[]>`'{}'::TEXT[]`;
+  }
+  // Escape single quotes by doubling them for PostgreSQL string literals
+  const escaped = values.map((v) => `'${v.replaceAll("'", "''")}'`).join(",");
+  return sql<string[]>`ARRAY[${sql.raw(escaped)}]::TEXT[]`;
+}
 
 // ============================================================================
 // Configuration

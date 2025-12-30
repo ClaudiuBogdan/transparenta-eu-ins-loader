@@ -1,8 +1,10 @@
 /**
  * Classification Routes - /api/v1/classifications
+ * Updated for V2 schema with JSONB names
  */
 
 import { Type, type Static } from "@sinclair/typebox";
+import { sql } from "kysely";
 
 import { db } from "../../db/connection.js";
 import {
@@ -106,7 +108,7 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
         summary: "List classification types",
         description:
           "Get available classification systems used to categorize statistical data. " +
-          "Examples: SEX (sex/gender), VARSTA (age groups), MEDII (urban/rural environment).",
+          "Examples: SEX (sex/gender), AGE_GROUP (age groups), RESIDENCE (urban/rural environment).",
         tags: ["Classifications"],
         querystring: ListClassificationTypesQuerySchema,
         response: {
@@ -122,13 +124,13 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
 
       let query = db
         .selectFrom("classification_types")
-        .select(["id", "code", "name", "is_hierarchical"]);
+        .select(["id", "code", "names", "is_hierarchical"]);
 
-      // Apply filters
+      // Apply filters - search in JSONB names
       if (search) {
         query = query.where((eb) =>
           eb.or([
-            eb("name", "ilike", `%${search}%`),
+            eb(sql`names->>'ro'`, "ilike", `%${search}%`),
             eb("code", "ilike", `%${search}%`),
           ])
         );
@@ -138,13 +140,13 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
         query = query.where("is_hierarchical", "=", isHierarchical);
       }
 
-      // Apply cursor
+      // Apply cursor using JSONB name
       if (cursorPayload) {
         query = query.where((eb) =>
           eb.or([
-            eb("name", ">", cursorPayload.sortValue as string),
+            eb(sql`names->>'ro'`, ">", cursorPayload.sortValue as string),
             eb.and([
-              eb("name", "=", cursorPayload.sortValue as string),
+              eb(sql`names->>'ro'`, "=", cursorPayload.sortValue as string),
               eb("id", ">", cursorPayload.id),
             ]),
           ])
@@ -152,7 +154,7 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
       }
 
       const rows = await query
-        .orderBy("name", "asc")
+        .orderBy(sql`names->>'ro'`, "asc")
         .orderBy("id", "asc")
         .limit(limit + 1)
         .execute();
@@ -161,27 +163,27 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
       const typeIds = rows.slice(0, limit).map((r) => r.id);
 
       let valueCounts: {
-        classification_type_id: number;
+        type_id: number;
         count: string | number | bigint;
       }[] = [];
       if (typeIds.length > 0) {
         valueCounts = await db
           .selectFrom("classification_values")
-          .select(["classification_type_id", db.fn.count("id").as("count")])
-          .where("classification_type_id", "in", typeIds)
-          .groupBy("classification_type_id")
+          .select(["type_id", db.fn.count("id").as("count")])
+          .where("type_id", "in", typeIds)
+          .groupBy("type_id")
           .execute();
       }
 
       const countMap = new Map(
-        valueCounts.map((vc) => [vc.classification_type_id, Number(vc.count)])
+        valueCounts.map((vc) => [vc.type_id, Number(vc.count)])
       );
 
       const hasMore = rows.length > limit;
       const items: ClassificationTypeDto[] = rows.slice(0, limit).map((ct) => ({
         id: ct.id,
         code: ct.code,
-        name: ct.name,
+        name: ct.names.ro,
         isHierarchical: ct.is_hierarchical,
         valueCount: countMap.get(ct.id) ?? 0,
       }));
@@ -232,7 +234,7 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
       // Get classification type
       const classificationType = await db
         .selectFrom("classification_types")
-        .select(["id", "code", "name", "is_hierarchical"])
+        .select(["id", "code", "names", "is_hierarchical"])
         .where("code", "=", code)
         .executeTakeFirst();
 
@@ -248,21 +250,21 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
         .select([
           "id",
           "code",
-          "name",
+          "names",
           "parent_id",
           "path",
           "level",
           "sort_order",
         ])
-        .where("classification_type_id", "=", classificationType.id);
+        .where("type_id", "=", classificationType.id);
 
-      // Apply filters
+      // Apply filters - search in JSONB names
       if (search) {
         query = query.where((eb) =>
           eb.or([
-            eb("name", "ilike", `%${search}%`),
+            eb(sql`names->>'ro'`, "ilike", `%${search}%`),
             eb("code", "ilike", `%${search}%`),
-            eb("name_normalized", "ilike", `%${search.toUpperCase()}%`),
+            eb(sql`names->>'normalized'`, "ilike", `%${search.toUpperCase()}%`),
           ])
         );
       }
@@ -304,7 +306,7 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
         .map((cv) => ({
           id: cv.id,
           code: cv.code,
-          name: cv.name,
+          name: cv.names.ro,
           parentId: cv.parent_id,
           path: cv.path,
           level: cv.level,
@@ -314,13 +316,13 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
       const totalResult = await db
         .selectFrom("classification_values")
         .select(db.fn.count("id").as("count"))
-        .where("classification_type_id", "=", classificationType.id)
+        .where("type_id", "=", classificationType.id)
         .executeTakeFirst();
 
       const typeDto: ClassificationTypeDto = {
         id: classificationType.id,
         code: classificationType.code,
-        name: classificationType.name,
+        name: classificationType.names.ro,
         isHierarchical: classificationType.is_hierarchical,
         valueCount: Number(totalResult?.count ?? 0),
       };
@@ -369,7 +371,7 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
       // Get classification type
       const classificationType = await db
         .selectFrom("classification_types")
-        .select(["id", "code", "name", "is_hierarchical"])
+        .select(["id", "code", "names", "is_hierarchical"])
         .where("code", "=", code)
         .executeTakeFirst();
 
@@ -383,13 +385,13 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
         .select([
           "id",
           "code",
-          "name",
+          "names",
           "parent_id",
           "path",
           "level",
           "sort_order",
         ])
-        .where("classification_type_id", "=", classificationType.id)
+        .where("type_id", "=", classificationType.id)
         .where("id", "=", valueIdNum)
         .executeTakeFirst();
 
@@ -407,13 +409,13 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
           .select([
             "id",
             "code",
-            "name",
+            "names",
             "parent_id",
             "path",
             "level",
             "sort_order",
           ])
-          .where("classification_type_id", "=", classificationType.id)
+          .where("type_id", "=", classificationType.id)
           .where("parent_id", "=", valueIdNum)
           .orderBy("sort_order", "asc")
           .execute();
@@ -421,7 +423,7 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
         children = childRows.map((cv) => ({
           id: cv.id,
           code: cv.code,
-          name: cv.name,
+          name: cv.names.ro,
           parentId: cv.parent_id,
           path: cv.path,
           level: cv.level,
@@ -431,7 +433,7 @@ export function registerClassificationRoutes(app: FastifyInstance): void {
       const valueDto: ClassificationValueDto = {
         id: value.id,
         code: value.code,
-        name: value.name,
+        name: value.names.ro,
         parentId: value.parent_id,
         path: value.path,
         level: value.level,

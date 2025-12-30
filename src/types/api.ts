@@ -53,6 +53,13 @@ export interface ContextDetailDto {
 // Matrix Types
 // ============================================================================
 
+export type MatrixStatus =
+  | "PENDING"
+  | "SYNCING"
+  | "SYNCED"
+  | "FAILED"
+  | "STALE";
+
 export interface MatrixSummaryDto {
   id: number;
   insCode: string;
@@ -66,7 +73,7 @@ export interface MatrixSummaryDto {
   startYear: number | null;
   endYear: number | null;
   lastUpdate: string | null;
-  status: "ACTIVE" | "DISCONTINUED";
+  status: MatrixStatus;
 }
 
 export interface MatrixDetailDto extends MatrixSummaryDto {

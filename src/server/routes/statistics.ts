@@ -1,7 +1,6 @@
 /**
  * Statistics Routes - /api/v1/statistics
- *
- * Main data query endpoint with time series format.
+ * Updated for V2 schema with JSONB metadata
  *
  * ## Default Behavior
  *
@@ -21,6 +20,7 @@
  */
 
 import { Type, type Static } from "@sinclair/typebox";
+import { sql } from "kysely";
 
 import { db } from "../../db/connection.js";
 import {
@@ -33,6 +33,7 @@ import {
   PaginationQuerySchema,
   PeriodicitySchema,
   TerritorialLevelSchema,
+  LocaleSchema,
 } from "../schemas/common.js";
 import { StatisticsSummaryResponseSchema } from "../schemas/responses.js";
 
@@ -45,34 +46,14 @@ import type {
 import type { FastifyInstance } from "fastify";
 
 // ============================================================================
-// Helpers
-// ============================================================================
-
-/**
- * Parse PostgreSQL array string format (e.g., "{ANNUAL,QUARTERLY}") to JS array
- */
-function parsePgArray(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value.map(String);
-  }
-  if (typeof value === "string") {
-    if (value.startsWith("{") && value.endsWith("}")) {
-      const inner = value.slice(1, -1);
-      if (inner === "") return [];
-      return inner.split(",").map((s) => s.trim());
-    }
-    return [value];
-  }
-  return [];
-}
-
-// ============================================================================
 // Schemas
 // ============================================================================
 
 const StatisticsQuerySchema = Type.Intersect([
   PaginationQuerySchema,
   Type.Object({
+    locale: Type.Optional(LocaleSchema),
+
     // Territory filters
     territoryId: Type.Optional(
       Type.Number({ description: "Filter by territory ID" })
@@ -179,6 +160,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
     async (request) => {
       const { matrixCode } = request.params;
       const {
+        locale = "ro",
         territoryId,
         territoryCode,
         territoryPath,
@@ -196,24 +178,19 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
       const limit = parseLimit(rawLimit, 100, 1000);
       const cursorPayload = validateCursor(cursor);
 
-      // Get matrix
+      // Get matrix with JSONB metadata
       const matrix = await db
         .selectFrom("matrices")
         .leftJoin("contexts", "matrices.context_id", "contexts.id")
         .select([
           "matrices.id",
           "matrices.ins_code",
-          "matrices.name",
-          "matrices.periodicity",
-          "matrices.has_uat_data",
-          "matrices.has_county_data",
-          "matrices.dimension_count",
-          "matrices.start_year",
-          "matrices.end_year",
-          "matrices.last_update",
-          "matrices.status",
+          "matrices.metadata",
+          "matrices.dimensions",
+          "matrices.sync_status",
+          "matrices.last_sync_at",
           "contexts.path as context_path",
-          "contexts.name as context_name",
+          "contexts.names as context_names",
         ])
         .where("matrices.ins_code", "=", matrixCode)
         .executeTakeFirst();
@@ -221,6 +198,9 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
       if (!matrix) {
         throw new NotFoundError(`Matrix ${matrixCode} not found`);
       }
+
+      const metadata = matrix.metadata;
+      const dimensionsSummary = matrix.dimensions ?? [];
 
       // Build statistics query
       let query = db
@@ -233,7 +213,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
         .leftJoin("territories", "statistics.territory_id", "territories.id")
         .leftJoin(
           "units_of_measure",
-          "statistics.unit_of_measure_id",
+          "statistics.unit_id",
           "units_of_measure.id"
         )
         .select([
@@ -245,15 +225,15 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           "time_periods.quarter",
           "time_periods.month",
           "time_periods.periodicity",
-          "time_periods.ins_label",
+          "time_periods.labels as tp_labels",
           "territories.id as terr_id",
           "territories.code as terr_code",
-          "territories.name as terr_name",
+          "territories.names as terr_names",
           "territories.level as terr_level",
           "territories.path as terr_path",
           "units_of_measure.id as unit_id",
           "units_of_measure.code as unit_code",
-          "units_of_measure.name as unit_name",
+          "units_of_measure.names as unit_names",
           "units_of_measure.symbol as unit_symbol",
         ])
         .where("statistics.matrix_id", "=", matrix.id);
@@ -268,7 +248,11 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
       }
 
       if (territoryPath) {
-        query = query.where("territories.path", "like", `${territoryPath}%`);
+        query = query.where(
+          sql`territories.path::text`,
+          "like",
+          `${territoryPath}%`
+        );
       }
 
       if (territoryLevel) {
@@ -348,7 +332,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
             .selectFrom("classification_values")
             .innerJoin(
               "classification_types",
-              "classification_values.classification_type_id",
+              "classification_values.type_id",
               "classification_types.id"
             )
             .select("classification_values.id")
@@ -405,31 +389,45 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
 
       if (groupBy === "none") {
         // Single series with all data points
-        const dataPoints: DataPointDto[] = dataRows.map((row) => ({
-          x: row.ins_label,
-          y: row.value ?? null,
-          status: row.value_status ?? undefined,
-          timePeriod: {
-            id: row.tp_id,
-            year: row.year,
-            quarter: row.quarter ?? undefined,
-            month: row.month ?? undefined,
-            periodicity: row.periodicity,
-          },
-        }));
+        const dataPoints: DataPointDto[] = dataRows.map((row) => {
+          const tpLabels = row.tp_labels;
+          return {
+            x: tpLabels
+              ? locale === "en" && tpLabels.en
+                ? tpLabels.en
+                : tpLabels.ro
+              : "",
+            y: row.value ?? null,
+            status: row.value_status ?? undefined,
+            timePeriod: {
+              id: row.tp_id,
+              year: row.year,
+              quarter: row.quarter ?? undefined,
+              month: row.month ?? undefined,
+              periodicity: row.periodicity,
+            },
+          };
+        });
 
         // Use first row for dimensions (they should all be the same for groupBy=none)
         // We know dataRows has elements because we throw NoDataError if rows.length === 0
         const firstRow = dataRows[0]!;
+        const terrNames = firstRow.terr_names;
+        const unitNames = firstRow.unit_names;
+
         series.push({
           seriesId: `${matrixCode}_series`,
-          name: matrix.name,
+          name: metadata.names.ro,
           dimensions: {
             territory: firstRow.terr_id
               ? {
                   id: firstRow.terr_id,
                   code: firstRow.terr_code ?? "",
-                  name: firstRow.terr_name ?? "",
+                  name: terrNames
+                    ? locale === "en" && terrNames.en
+                      ? terrNames.en
+                      : terrNames.ro
+                    : "",
                   level: firstRow.terr_level ?? "",
                   path: firstRow.terr_path ?? "",
                 }
@@ -438,7 +436,11 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
               ? {
                   id: firstRow.unit_id,
                   code: firstRow.unit_code ?? "",
-                  name: firstRow.unit_name ?? "",
+                  name: unitNames
+                    ? locale === "en" && unitNames.en
+                      ? unitNames.en
+                      : unitNames.ro
+                    : "",
                   symbol: firstRow.unit_symbol ?? null,
                 }
               : undefined,
@@ -447,7 +449,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           yAxis: {
             name: "Value",
             type: "FLOAT",
-            unit: firstRow.unit_symbol ?? firstRow.unit_name ?? "",
+            unit: firstRow.unit_symbol ?? (unitNames ? unitNames.ro : "") ?? "",
           },
           data: dataPoints,
         });
@@ -463,8 +465,13 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           if (!territoryGroups.has(terrId)) {
             territoryGroups.set(terrId, { info: row, points: [] });
           }
+          const tpLabels = row.tp_labels;
           territoryGroups.get(terrId)!.points.push({
-            x: row.ins_label,
+            x: tpLabels
+              ? locale === "en" && tpLabels.en
+                ? tpLabels.en
+                : tpLabels.ro
+              : "",
             y: row.value ?? null,
             status: row.value_status ?? undefined,
             timePeriod: {
@@ -479,15 +486,26 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
 
         for (const [terrId, group] of territoryGroups) {
           const { info, points } = group;
+          const terrNames = info.terr_names;
+          const unitNames = info.unit_names;
+
           series.push({
             seriesId: `${matrixCode}_${info.terr_code ?? String(terrId)}`,
-            name: info.terr_name ?? "Unknown",
+            name: terrNames
+              ? locale === "en" && terrNames.en
+                ? terrNames.en
+                : terrNames.ro
+              : "Unknown",
             dimensions: {
               territory: info.terr_id
                 ? {
                     id: info.terr_id,
                     code: info.terr_code ?? "",
-                    name: info.terr_name ?? "",
+                    name: terrNames
+                      ? locale === "en" && terrNames.en
+                        ? terrNames.en
+                        : terrNames.ro
+                      : "",
                     level: info.terr_level ?? "",
                     path: info.terr_path ?? "",
                   }
@@ -496,7 +514,11 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
                 ? {
                     id: info.unit_id,
                     code: info.unit_code ?? "",
-                    name: info.unit_name ?? "",
+                    name: unitNames
+                      ? locale === "en" && unitNames.en
+                        ? unitNames.en
+                        : unitNames.ro
+                      : "",
                     symbol: info.unit_symbol ?? null,
                   }
                 : undefined,
@@ -505,7 +527,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
             yAxis: {
               name: "Value",
               type: "FLOAT",
-              unit: info.unit_symbol ?? info.unit_name ?? "",
+              unit: info.unit_symbol ?? (unitNames ? unitNames.ro : "") ?? "",
             },
             data: points,
           });
@@ -525,7 +547,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
                 )
                 .innerJoin(
                   "classification_types",
-                  "classification_values.classification_type_id",
+                  "classification_values.type_id",
                   "classification_types.id"
                 )
                 .select([
@@ -533,7 +555,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
                   "classification_types.code as type_code",
                   "classification_values.id as value_id",
                   "classification_values.code as value_code",
-                  "classification_values.name as value_name",
+                  "classification_values.names as value_names",
                 ])
                 .where("statistic_classifications.matrix_id", "=", matrix.id)
                 .where("statistic_classifications.statistic_id", "in", statIds)
@@ -549,10 +571,15 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           if (!classMap.has(cv.statistic_id)) {
             classMap.set(cv.statistic_id, {});
           }
+          const valueNames = cv.value_names;
           classMap.get(cv.statistic_id)![cv.type_code] = {
             id: cv.value_id,
             code: cv.value_code,
-            name: cv.value_name,
+            name: valueNames
+              ? locale === "en" && valueNames.en
+                ? valueNames.en
+                : valueNames.ro
+              : "",
           };
         }
 
@@ -579,8 +606,13 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           if (!classGroups.has(key)) {
             classGroups.set(key, { info: row, classifications, points: [] });
           }
+          const tpLabels = row.tp_labels;
           classGroups.get(key)!.points.push({
-            x: row.ins_label,
+            x: tpLabels
+              ? locale === "en" && tpLabels.en
+                ? tpLabels.en
+                : tpLabels.ro
+              : "",
             y: row.value ?? null,
             status: row.value_status ?? undefined,
             timePeriod: {
@@ -598,16 +630,22 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           const classNames = Object.values(classifications)
             .map((c) => c.name)
             .join(", ");
+          const terrNames = info.terr_names;
+          const unitNames = info.unit_names;
 
           series.push({
             seriesId: `${matrixCode}_${key || "all"}`,
-            name: classNames || matrix.name,
+            name: classNames || metadata.names.ro,
             dimensions: {
               territory: info.terr_id
                 ? {
                     id: info.terr_id,
                     code: info.terr_code ?? "",
-                    name: info.terr_name ?? "",
+                    name: terrNames
+                      ? locale === "en" && terrNames.en
+                        ? terrNames.en
+                        : terrNames.ro
+                      : "",
                     level: info.terr_level ?? "",
                     path: info.terr_path ?? "",
                   }
@@ -620,7 +658,11 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
                 ? {
                     id: info.unit_id,
                     code: info.unit_code ?? "",
-                    name: info.unit_name ?? "",
+                    name: unitNames
+                      ? locale === "en" && unitNames.en
+                        ? unitNames.en
+                        : unitNames.ro
+                      : "",
                     symbol: info.unit_symbol ?? null,
                   }
                 : undefined,
@@ -629,27 +671,35 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
             yAxis: {
               name: "Value",
               type: "FLOAT",
-              unit: info.unit_symbol ?? info.unit_name ?? "",
+              unit: info.unit_symbol ?? (unitNames ? unitNames.ro : "") ?? "",
             },
             data: points,
           });
         }
       }
 
+      const contextNames = matrix.context_names;
       const matrixDto: MatrixSummaryDto = {
         id: matrix.id,
         insCode: matrix.ins_code,
-        name: matrix.name,
+        name:
+          locale === "en" && metadata.names.en
+            ? metadata.names.en
+            : metadata.names.ro,
         contextPath: matrix.context_path,
-        contextName: matrix.context_name,
-        periodicity: parsePgArray(matrix.periodicity),
-        hasUatData: matrix.has_uat_data,
-        hasCountyData: matrix.has_county_data,
-        dimensionCount: matrix.dimension_count,
-        startYear: matrix.start_year,
-        endYear: matrix.end_year,
-        lastUpdate: matrix.last_update?.toISOString() ?? null,
-        status: matrix.status,
+        contextName: contextNames
+          ? locale === "en" && contextNames.en
+            ? contextNames.en
+            : contextNames.ro
+          : null,
+        periodicity: metadata.periodicity ?? [],
+        hasUatData: metadata.flags?.hasUatData ?? false,
+        hasCountyData: metadata.flags?.hasCountyData ?? false,
+        dimensionCount: dimensionsSummary.length,
+        startYear: metadata.yearRange?.[0] ?? null,
+        endYear: metadata.yearRange?.[1] ?? null,
+        lastUpdate: metadata.lastUpdate ?? null,
+        status: matrix.sync_status,
       };
 
       return {
@@ -683,7 +733,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
    * GET /api/v1/statistics/:matrixCode/summary
    * Get aggregated summary statistics
    */
-  app.get<{ Params: MatrixCodeParam }>(
+  app.get<{ Params: MatrixCodeParam; Querystring: { locale?: "ro" | "en" } }>(
     "/statistics/:matrixCode/summary",
     {
       schema: {
@@ -693,6 +743,9 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           "time range, territory distribution, and value statistics (min, max, avg, sum).",
         tags: ["Statistics"],
         params: MatrixCodeParamSchema,
+        querystring: Type.Object({
+          locale: Type.Optional(LocaleSchema),
+        }),
         response: {
           200: SummaryDataResponseSchema,
         },
@@ -700,6 +753,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
     },
     async (request) => {
       const { matrixCode } = request.params;
+      const locale = request.query.locale ?? "ro";
 
       // Get matrix
       const matrix = await db
@@ -708,17 +762,12 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
         .select([
           "matrices.id",
           "matrices.ins_code",
-          "matrices.name",
-          "matrices.periodicity",
-          "matrices.has_uat_data",
-          "matrices.has_county_data",
-          "matrices.dimension_count",
-          "matrices.start_year",
-          "matrices.end_year",
-          "matrices.last_update",
-          "matrices.status",
+          "matrices.metadata",
+          "matrices.dimensions",
+          "matrices.sync_status",
+          "matrices.last_sync_at",
           "contexts.path as context_path",
-          "contexts.name as context_name",
+          "contexts.names as context_names",
         ])
         .where("matrices.ins_code", "=", matrixCode)
         .executeTakeFirst();
@@ -726,6 +775,9 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
       if (!matrix) {
         throw new NotFoundError(`Matrix ${matrixCode} not found`);
       }
+
+      const metadata = matrix.metadata;
+      const dimensionsSummary = matrix.dimensions ?? [];
 
       // Get statistics aggregates
       const stats = await db
@@ -772,20 +824,28 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
         .where("value", "is", null)
         .executeTakeFirst();
 
+      const contextNames = matrix.context_names;
       const matrixDto: MatrixSummaryDto = {
         id: matrix.id,
         insCode: matrix.ins_code,
-        name: matrix.name,
+        name:
+          locale === "en" && metadata.names.en
+            ? metadata.names.en
+            : metadata.names.ro,
         contextPath: matrix.context_path,
-        contextName: matrix.context_name,
-        periodicity: parsePgArray(matrix.periodicity),
-        hasUatData: matrix.has_uat_data,
-        hasCountyData: matrix.has_county_data,
-        dimensionCount: matrix.dimension_count,
-        startYear: matrix.start_year,
-        endYear: matrix.end_year,
-        lastUpdate: matrix.last_update?.toISOString() ?? null,
-        status: matrix.status,
+        contextName: contextNames
+          ? locale === "en" && contextNames.en
+            ? contextNames.en
+            : contextNames.ro
+          : null,
+        periodicity: metadata.periodicity ?? [],
+        hasUatData: metadata.flags?.hasUatData ?? false,
+        hasCountyData: metadata.flags?.hasCountyData ?? false,
+        dimensionCount: dimensionsSummary.length,
+        startYear: metadata.yearRange?.[0] ?? null,
+        endYear: metadata.yearRange?.[1] ?? null,
+        lastUpdate: metadata.lastUpdate ?? null,
+        status: matrix.sync_status,
       };
 
       const summary: StatisticsSummaryDto = {

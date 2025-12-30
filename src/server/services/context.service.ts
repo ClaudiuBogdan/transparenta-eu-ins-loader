@@ -1,6 +1,9 @@
 /**
  * Context Service - Business logic for context operations
+ * Updated for V2 schema with JSONB names
  */
+
+import { sql } from "kysely";
 
 import { db } from "../../db/connection.js";
 import {
@@ -11,6 +14,7 @@ import {
 } from "../../utils/pagination.js";
 import { NotFoundError } from "../plugins/error-handler.js";
 
+import type { BilingualText } from "../../db/types-v2.js";
 import type {
   ContextDto,
   ContextDetailDto,
@@ -49,8 +53,7 @@ export async function listContexts(
     .select([
       "id",
       "ins_code",
-      "name",
-      "name_en",
+      "names",
       "level",
       "parent_id",
       "path",
@@ -67,16 +70,16 @@ export async function listContexts(
   }
 
   if (options.pathPrefix) {
-    query = query.where("path", "like", `${options.pathPrefix}%`);
+    query = query.where(sql`path::text`, "like", `${options.pathPrefix}%`);
   }
 
-  // Apply cursor-based pagination
+  // Apply cursor-based pagination using JSONB name
   if (cursorPayload) {
     query = query.where((eb) =>
       eb.or([
-        eb("name", ">", cursorPayload.sortValue as string),
+        eb(sql`names->>'ro'`, ">", cursorPayload.sortValue as string),
         eb.and([
-          eb("name", "=", cursorPayload.sortValue as string),
+          eb(sql`names->>'ro'`, "=", cursorPayload.sortValue as string),
           eb("id", ">", cursorPayload.id),
         ]),
       ])
@@ -85,7 +88,7 @@ export async function listContexts(
 
   // Fetch one extra to check for more
   const rows = await query
-    .orderBy("name", "asc")
+    .orderBy(sql`names->>'ro'`, "asc")
     .orderBy("id", "asc")
     .limit(limit + 1)
     .execute();
@@ -117,8 +120,7 @@ export async function getContextById(
     .select([
       "id",
       "ins_code",
-      "name",
-      "name_en",
+      "names",
       "level",
       "parent_id",
       "path",
@@ -143,8 +145,7 @@ export async function getContextById(
       .select([
         "id",
         "ins_code",
-        "name",
-        "name_en",
+        "names",
         "level",
         "parent_id",
         "path",
@@ -168,15 +169,14 @@ export async function getContextById(
       .select([
         "id",
         "ins_code",
-        "name",
-        "name_en",
+        "names",
         "level",
         "parent_id",
         "path",
         "children_type",
       ])
       .where("parent_id", "=", id)
-      .orderBy("name", "asc")
+      .orderBy(sql`names->>'ro'`, "asc")
       .execute();
 
     return {
@@ -191,39 +191,41 @@ export async function getContextById(
       .select([
         "id",
         "ins_code",
-        "name",
-        "name_en",
-        "periodicity",
-        "has_uat_data",
-        "has_county_data",
-        "dimension_count",
-        "start_year",
-        "end_year",
-        "last_update",
-        "status",
+        "metadata",
+        "dimensions",
+        "sync_status",
+        "last_sync_at",
       ])
       .where("context_id", "=", id)
-      .orderBy("name", "asc")
+      .orderBy(sql`metadata->'names'->>'ro'`, "asc")
       .execute();
 
     const localizedContextName =
-      locale === "en" && context.name_en ? context.name_en : context.name;
+      locale === "en" && context.names.en ? context.names.en : context.names.ro;
 
-    const matrixDtos: MatrixSummaryDto[] = matrices.map((m) => ({
-      id: m.id,
-      insCode: m.ins_code,
-      name: locale === "en" && m.name_en ? m.name_en : m.name,
-      contextPath: context.path,
-      contextName: localizedContextName,
-      periodicity: m.periodicity ?? [],
-      hasUatData: m.has_uat_data,
-      hasCountyData: m.has_county_data,
-      dimensionCount: m.dimension_count,
-      startYear: m.start_year,
-      endYear: m.end_year,
-      lastUpdate: m.last_update?.toISOString() ?? null,
-      status: m.status,
-    }));
+    const matrixDtos: MatrixSummaryDto[] = matrices.map((m) => {
+      const metadata = m.metadata;
+      const dimensions = m.dimensions ?? [];
+
+      return {
+        id: m.id,
+        insCode: m.ins_code,
+        name:
+          locale === "en" && metadata.names.en
+            ? metadata.names.en
+            : metadata.names.ro,
+        contextPath: context.path,
+        contextName: localizedContextName,
+        periodicity: metadata.periodicity ?? [],
+        hasUatData: metadata.flags?.hasUatData ?? false,
+        hasCountyData: metadata.flags?.hasCountyData ?? false,
+        dimensionCount: dimensions.length,
+        startYear: metadata.yearRange?.[0] ?? null,
+        endYear: metadata.yearRange?.[1] ?? null,
+        lastUpdate: metadata.lastUpdate ?? null,
+        status: m.sync_status,
+      };
+    });
 
     return {
       context: contextDto,
@@ -245,8 +247,7 @@ export async function getContextByCode(
     .select([
       "id",
       "ins_code",
-      "name",
-      "name_en",
+      "names",
       "level",
       "parent_id",
       "path",
@@ -269,12 +270,11 @@ export async function getContextByCode(
 interface ContextRow {
   id: number;
   ins_code: string;
-  name: string;
-  name_en: string | null;
+  names: BilingualText;
   level: number;
   parent_id: number | null;
   path: string;
-  children_type: string;
+  children_type: "context" | "matrix";
 }
 
 function mapContextRow(
@@ -284,10 +284,10 @@ function mapContextRow(
   return {
     id: row.id,
     insCode: row.ins_code,
-    name: locale === "en" && row.name_en ? row.name_en : row.name,
+    name: locale === "en" && row.names.en ? row.names.en : row.names.ro,
     level: row.level,
     parentId: row.parent_id,
     path: row.path,
-    childrenType: row.children_type as "context" | "matrix",
+    childrenType: row.children_type,
   };
 }

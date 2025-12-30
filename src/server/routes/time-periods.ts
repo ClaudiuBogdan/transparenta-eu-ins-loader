@@ -1,5 +1,6 @@
 /**
  * Time Period Routes - /api/v1/time-periods
+ * Updated for V2 schema with JSONB labels
  */
 
 import { Type, type Static } from "@sinclair/typebox";
@@ -14,6 +15,7 @@ import {
   PaginationQuerySchema,
   PeriodicitySchema,
   YearRangeQuerySchema,
+  LocaleSchema,
 } from "../schemas/common.js";
 import { TimePeriodListResponseSchema } from "../schemas/responses.js";
 
@@ -28,6 +30,7 @@ const ListTimePeriodsQuerySchema = Type.Intersect([
   PaginationQuerySchema,
   YearRangeQuerySchema,
   Type.Object({
+    locale: Type.Optional(LocaleSchema),
     periodicity: Type.Optional(PeriodicitySchema),
     matrixCode: Type.Optional(
       Type.String({
@@ -66,6 +69,7 @@ export function registerTimePeriodRoutes(app: FastifyInstance): void {
     },
     async (request) => {
       const {
+        locale = "ro",
         periodicity,
         yearFrom,
         yearTo,
@@ -85,7 +89,7 @@ export function registerTimePeriodRoutes(app: FastifyInstance): void {
           "quarter",
           "month",
           "periodicity",
-          "ins_label",
+          "labels",
           "period_start",
           "period_end",
         ]);
@@ -103,15 +107,10 @@ export function registerTimePeriodRoutes(app: FastifyInstance): void {
             "id",
             "in",
             db
-              .selectFrom("matrix_dimension_options")
-              .innerJoin(
-                "matrix_dimensions",
-                "matrix_dimension_options.matrix_dimension_id",
-                "matrix_dimensions.id"
-              )
-              .select("matrix_dimension_options.time_period_id")
-              .where("matrix_dimensions.matrix_id", "=", matrix.id)
-              .where("matrix_dimension_options.time_period_id", "is not", null)
+              .selectFrom("matrix_nom_items")
+              .select("time_period_id")
+              .where("matrix_id", "=", matrix.id)
+              .where("time_period_id", "is not", null)
           );
         }
       }
@@ -157,7 +156,7 @@ export function registerTimePeriodRoutes(app: FastifyInstance): void {
         quarter: tp.quarter,
         month: tp.month,
         periodicity: tp.periodicity,
-        insLabel: tp.ins_label,
+        insLabel: locale === "en" && tp.labels.en ? tp.labels.en : tp.labels.ro,
         periodStart: tp.period_start?.toISOString().split("T")[0] ?? "",
         periodEnd: tp.period_end?.toISOString().split("T")[0] ?? "",
       }));

@@ -87,8 +87,11 @@ export const PeriodicitySchema = Type.Union([
 ]);
 
 export const MatrixStatusSchema = Type.Union([
-  Type.Literal("ACTIVE"),
-  Type.Literal("DISCONTINUED"),
+  Type.Literal("PENDING"),
+  Type.Literal("SYNCING"),
+  Type.Literal("SYNCED"),
+  Type.Literal("FAILED"),
+  Type.Literal("STALE"),
 ]);
 
 export const DimensionTypeSchema = Type.Union([

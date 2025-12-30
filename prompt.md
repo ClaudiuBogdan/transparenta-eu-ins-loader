@@ -117,3 +117,8 @@ This is a new schema, that build on the learning from the previous schema.
 ---
 
 I want to receive a reference link on the api query, to make it easy to open the ins data link and verify the data. Analyze what endpoints can provide this link and add it to the api response.
+
+
+---
+
+Query the old db and add the missing unit of measure seed based on the old data.

@@ -31,6 +31,18 @@ import type {
 } from "../../types/api.js";
 import type { FastifyInstance } from "fastify";
 
+// Helper to normalize lastUpdate to ISO string or null
+function normalizeLastUpdate(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string") {
+    // Check if it's a valid date string
+    const date = new Date(value);
+    return isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  return null;
+}
+
 // ============================================================================
 // Schemas
 // ============================================================================
@@ -252,7 +264,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           dimensionCount: dimensions.length,
           startYear: metadata.yearRange?.[0] ?? null,
           endYear: metadata.yearRange?.[1] ?? null,
-          lastUpdate: metadata.lastUpdate ?? null,
+          lastUpdate: normalizeLastUpdate(metadata.lastUpdate),
           status: m.sync_status,
         };
       });
@@ -364,7 +376,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
         dimensionCount: dimensionsSummary.length,
         startYear: metadata.yearRange?.[0] ?? null,
         endYear: metadata.yearRange?.[1] ?? null,
-        lastUpdate: metadata.lastUpdate ?? null,
+        lastUpdate: normalizeLastUpdate(metadata.lastUpdate),
         status: matrix.sync_status,
         definition:
           locale === "en" && metadata.definitions?.en
@@ -625,6 +637,268 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
             isHierarchical: dimension.is_hierarchical,
             optionCount: dimension.option_count,
           },
+        },
+      };
+    }
+  );
+
+  /**
+   * GET /api/v1/matrices/:code/data-coverage
+   * Get data coverage statistics for a matrix
+   */
+  app.get<{
+    Params: Static<typeof CodeParamSchema>;
+    Querystring: { locale?: Locale };
+  }>(
+    "/matrices/:code/data-coverage",
+    {
+      schema: {
+        summary: "Get data coverage",
+        description:
+          "Get data coverage statistics for a matrix including territorial and temporal coverage. " +
+          "Shows which territories and years have data available.",
+        tags: ["Matrices"],
+        params: CodeParamSchema,
+        querystring: Type.Object({
+          locale: Type.Optional(LocaleSchema),
+        }),
+      },
+    },
+    async (request) => {
+      const { code } = request.params;
+      const locale = request.query.locale ?? "ro";
+
+      // Get matrix
+      const matrix = await db
+        .selectFrom("matrices")
+        .select(["id", "ins_code", "metadata"])
+        .where("ins_code", "=", code)
+        .executeTakeFirst();
+
+      if (!matrix) {
+        throw new NotFoundError(`Matrix with code ${code} not found`);
+      }
+
+      // Get territorial coverage
+      const territorialCoverage = await db
+        .selectFrom("statistics")
+        .innerJoin("territories", "statistics.territory_id", "territories.id")
+        .select([
+          "territories.level",
+          sql<number>`COUNT(DISTINCT territories.id)`.as("territory_count"),
+          sql<number>`COUNT(DISTINCT statistics.id)`.as("data_point_count"),
+        ])
+        .where("statistics.matrix_id", "=", matrix.id)
+        .groupBy("territories.level")
+        .execute();
+
+      // Get temporal coverage
+      const temporalCoverage = await db
+        .selectFrom("statistics")
+        .innerJoin(
+          "time_periods",
+          "statistics.time_period_id",
+          "time_periods.id"
+        )
+        .select([
+          "time_periods.periodicity",
+          sql<number>`MIN(time_periods.year)`.as("min_year"),
+          sql<number>`MAX(time_periods.year)`.as("max_year"),
+          sql<number>`COUNT(DISTINCT time_periods.year)`.as("year_count"),
+          sql<number>`COUNT(DISTINCT statistics.id)`.as("data_point_count"),
+        ])
+        .where("statistics.matrix_id", "=", matrix.id)
+        .groupBy("time_periods.periodicity")
+        .execute();
+
+      // Get overall stats
+      const overallStats = await db
+        .selectFrom("statistics")
+        .select([
+          sql<number>`COUNT(*)`.as("total_data_points"),
+          sql<number>`COUNT(CASE WHEN value IS NOT NULL THEN 1 END)`.as(
+            "non_null_count"
+          ),
+          sql<number>`COUNT(CASE WHEN value IS NULL THEN 1 END)`.as(
+            "null_count"
+          ),
+          sql<number>`COUNT(CASE WHEN value_status = 'missing' THEN 1 END)`.as(
+            "missing_count"
+          ),
+        ])
+        .where("matrix_id", "=", matrix.id)
+        .executeTakeFirst();
+
+      const metadata = matrix.metadata;
+
+      return {
+        data: {
+          matrixCode: code,
+          name:
+            locale === "en" && metadata.names.en
+              ? metadata.names.en
+              : metadata.names.ro,
+          territorial: territorialCoverage.map((tc) => ({
+            level: tc.level,
+            territoryCount: tc.territory_count,
+            dataPointCount: tc.data_point_count,
+          })),
+          temporal: temporalCoverage.map((tc) => ({
+            periodicity: tc.periodicity,
+            minYear: tc.min_year,
+            maxYear: tc.max_year,
+            yearCount: tc.year_count,
+            dataPointCount: tc.data_point_count,
+          })),
+          overall: overallStats
+            ? {
+                totalDataPoints: overallStats.total_data_points,
+                nonNullCount: overallStats.non_null_count,
+                nullCount: overallStats.null_count,
+                missingCount: overallStats.missing_count,
+                completeness:
+                  overallStats.total_data_points > 0
+                    ? Math.round(
+                        (overallStats.non_null_count /
+                          overallStats.total_data_points) *
+                          10000
+                      ) / 100
+                    : 0,
+              }
+            : null,
+        },
+      };
+    }
+  );
+
+  /**
+   * GET /api/v1/matrices/:code/breakdowns
+   * Get available dimension breakdowns for a matrix
+   */
+  app.get<{
+    Params: Static<typeof CodeParamSchema>;
+    Querystring: { locale?: Locale };
+  }>(
+    "/matrices/:code/breakdowns",
+    {
+      schema: {
+        summary: "Get breakdowns",
+        description:
+          "Get all available dimension breakdowns for a matrix including territorial, " +
+          "temporal, and classification dimensions with their option counts.",
+        tags: ["Matrices"],
+        params: CodeParamSchema,
+        querystring: Type.Object({
+          locale: Type.Optional(LocaleSchema),
+        }),
+      },
+    },
+    async (request) => {
+      const { code } = request.params;
+      const locale = request.query.locale ?? "ro";
+
+      // Get matrix
+      const matrix = await db
+        .selectFrom("matrices")
+        .select(["id", "ins_code", "metadata"])
+        .where("ins_code", "=", code)
+        .executeTakeFirst();
+
+      if (!matrix) {
+        throw new NotFoundError(`Matrix with code ${code} not found`);
+      }
+
+      // Get dimensions with classification type info
+      const dimensions = await db
+        .selectFrom("matrix_dimensions")
+        .leftJoin(
+          "classification_types",
+          "matrix_dimensions.classification_type_id",
+          "classification_types.id"
+        )
+        .select([
+          "matrix_dimensions.id",
+          "matrix_dimensions.dim_index",
+          "matrix_dimensions.labels",
+          "matrix_dimensions.dimension_type",
+          "matrix_dimensions.is_hierarchical",
+          "matrix_dimensions.option_count",
+          "classification_types.code as classification_type_code",
+          "classification_types.names as classification_type_names",
+        ])
+        .where("matrix_dimensions.matrix_id", "=", matrix.id)
+        .orderBy("matrix_dimensions.dim_index", "asc")
+        .execute();
+
+      // Get sample values for each dimension
+      const breakdowns = await Promise.all(
+        dimensions.map(async (dim) => {
+          // Get first few nom_items as examples
+          const sampleItems = await db
+            .selectFrom("matrix_nom_items")
+            .select(["nom_item_id", "labels", "offset_order"])
+            .where("matrix_id", "=", matrix.id)
+            .where("dim_index", "=", dim.dim_index)
+            .orderBy("offset_order", "asc")
+            .limit(5)
+            .execute();
+
+          const dimLabels = dim.labels;
+          return {
+            dimIndex: dim.dim_index,
+            label: dimLabels
+              ? locale === "en" && dimLabels.en
+                ? dimLabels.en
+                : dimLabels.ro
+              : "",
+            dimensionType: dim.dimension_type,
+            isHierarchical: dim.is_hierarchical,
+            optionCount: dim.option_count,
+            classificationType: dim.classification_type_code
+              ? {
+                  code: dim.classification_type_code,
+                  name: dim.classification_type_names
+                    ? locale === "en" && dim.classification_type_names.en
+                      ? dim.classification_type_names.en
+                      : dim.classification_type_names.ro
+                    : null,
+                }
+              : null,
+            sampleValues: sampleItems.map((item) => {
+              const itemLabels = item.labels;
+              return {
+                nomItemId: item.nom_item_id,
+                label: itemLabels
+                  ? locale === "en" && itemLabels.en
+                    ? itemLabels.en
+                    : itemLabels.ro
+                  : "",
+              };
+            }),
+          };
+        })
+      );
+
+      // Group by dimension type
+      const byType = {
+        territorial: breakdowns.filter(
+          (b) => b.dimensionType === "TERRITORIAL"
+        ),
+        temporal: breakdowns.filter((b) => b.dimensionType === "TEMPORAL"),
+        classification: breakdowns.filter(
+          (b) => b.dimensionType === "CLASSIFICATION"
+        ),
+        unitOfMeasure: breakdowns.filter(
+          (b) => b.dimensionType === "UNIT_OF_MEASURE"
+        ),
+      };
+
+      return {
+        data: {
+          matrixCode: code,
+          dimensionCount: dimensions.length,
+          breakdowns,
+          byType,
         },
       };
     }

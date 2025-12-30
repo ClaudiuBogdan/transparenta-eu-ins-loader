@@ -44,6 +44,18 @@ import type {
 } from "../../types/api.js";
 import type { FastifyInstance } from "fastify";
 
+// Helper to normalize lastUpdate to ISO string or null
+function normalizeLastUpdate(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string") {
+    // Check if it's a valid date string
+    const date = new Date(value);
+    return isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  return null;
+}
+
 // ============================================================================
 // Schemas
 // ============================================================================
@@ -697,7 +709,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
         dimensionCount: dimensionsSummary.length,
         startYear: metadata.yearRange?.[0] ?? null,
         endYear: metadata.yearRange?.[1] ?? null,
-        lastUpdate: metadata.lastUpdate ?? null,
+        lastUpdate: normalizeLastUpdate(metadata.lastUpdate),
         status: matrix.sync_status,
       };
 
@@ -843,7 +855,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
         dimensionCount: dimensionsSummary.length,
         startYear: metadata.yearRange?.[0] ?? null,
         endYear: metadata.yearRange?.[1] ?? null,
-        lastUpdate: metadata.lastUpdate ?? null,
+        lastUpdate: normalizeLastUpdate(metadata.lastUpdate),
         status: matrix.sync_status,
       };
 

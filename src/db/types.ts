@@ -342,6 +342,117 @@ export interface SyncCheckpointsTable {
 }
 
 // ============================================================================
+// DISCOVERY & ANALYTICS Tables
+// ============================================================================
+
+/**
+ * matrix_tags - Tags for discoverability
+ */
+export interface MatrixTagsTable {
+  id: Generated<number>;
+  name: string;
+  name_en: string | null;
+  slug: string;
+  category: string;
+  description: string | null;
+  usage_count: Generated<number>;
+  created_at: Generated<Date>;
+}
+
+/**
+ * matrix_tag_assignments - Junction table for matrix-tag assignments
+ */
+export interface MatrixTagAssignmentsTable {
+  matrix_id: number;
+  tag_id: number;
+}
+
+/**
+ * matrix_relationships - Related matrices
+ */
+export interface MatrixRelationshipsTable {
+  id: Generated<number>;
+  matrix_id: number;
+  related_matrix_id: number;
+  relationship_type: string;
+  notes: string | null;
+  created_at: Generated<Date>;
+}
+
+/**
+ * data_quality_metrics - Data quality metrics per matrix/territory/year
+ */
+export interface DataQualityMetricsTable {
+  id: Generated<number>;
+  matrix_id: number;
+  territory_id: number | null;
+  year: number | null;
+  expected_data_points: number | null;
+  actual_data_points: number | null;
+  null_count: Generated<number>;
+  unavailable_count: Generated<number>;
+  computed_at: Generated<Date>;
+}
+
+/**
+ * saved_queries - User-saved queries for reuse
+ */
+export interface SavedQueriesTable {
+  id: Generated<number>;
+  name: string;
+  description: string | null;
+  matrix_code: string;
+  territory_filter: Record<string, unknown> | null;
+  time_filter: Record<string, unknown> | null;
+  classification_filter: Record<string, unknown> | null;
+  options: Record<string, unknown> | null;
+  is_public: Generated<boolean>;
+  execution_count: Generated<number>;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+/**
+ * composite_indicators - Calculated indicators from multiple matrices
+ */
+export interface CompositeIndicatorsTable {
+  id: Generated<number>;
+  code: string;
+  name: string;
+  name_en: string | null;
+  formula: string;
+  unit_code: string | null;
+  config: CompositeIndicatorConfig;
+  category: string | null;
+  is_active: Generated<boolean>;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+/**
+ * Config structure for composite indicators
+ */
+export interface CompositeIndicatorConfig {
+  numerator:
+    | {
+        matrixCode: string;
+        description?: string;
+        filter?: Record<string, unknown>;
+      }
+    | {
+        matrixCode: string;
+        description?: string;
+        filter?: Record<string, unknown>;
+      }[];
+  denominator?: {
+    matrixCode: string;
+    description?: string;
+    filter?: Record<string, unknown>;
+  };
+  multiplier?: number;
+}
+
+// ============================================================================
 // Database Interface
 // ============================================================================
 
@@ -368,6 +479,14 @@ export interface Database {
   statistics: StatisticsTable;
   statistic_classifications: StatisticClassificationsTable;
   sync_checkpoints: SyncCheckpointsTable;
+
+  // Discovery & Analytics
+  matrix_tags: MatrixTagsTable;
+  matrix_tag_assignments: MatrixTagAssignmentsTable;
+  matrix_relationships: MatrixRelationshipsTable;
+  data_quality_metrics: DataQualityMetricsTable;
+  saved_queries: SavedQueriesTable;
+  composite_indicators: CompositeIndicatorsTable;
 }
 
 // ============================================================================
@@ -445,6 +564,35 @@ export type NewStatisticClassification =
 export type SyncCheckpoint = Selectable<SyncCheckpointsTable>;
 export type NewSyncCheckpoint = Insertable<SyncCheckpointsTable>;
 export type SyncCheckpointUpdate = Updateable<SyncCheckpointsTable>;
+
+// Matrix Tags
+export type MatrixTag = Selectable<MatrixTagsTable>;
+export type NewMatrixTag = Insertable<MatrixTagsTable>;
+export type MatrixTagUpdate = Updateable<MatrixTagsTable>;
+
+// Matrix Tag Assignments
+export type MatrixTagAssignment = Selectable<MatrixTagAssignmentsTable>;
+export type NewMatrixTagAssignment = Insertable<MatrixTagAssignmentsTable>;
+
+// Matrix Relationships
+export type MatrixRelationship = Selectable<MatrixRelationshipsTable>;
+export type NewMatrixRelationship = Insertable<MatrixRelationshipsTable>;
+export type MatrixRelationshipUpdate = Updateable<MatrixRelationshipsTable>;
+
+// Data Quality Metrics
+export type DataQualityMetric = Selectable<DataQualityMetricsTable>;
+export type NewDataQualityMetric = Insertable<DataQualityMetricsTable>;
+export type DataQualityMetricUpdate = Updateable<DataQualityMetricsTable>;
+
+// Saved Queries
+export type SavedQuery = Selectable<SavedQueriesTable>;
+export type NewSavedQuery = Insertable<SavedQueriesTable>;
+export type SavedQueryUpdate = Updateable<SavedQueriesTable>;
+
+// Composite Indicators
+export type CompositeIndicator = Selectable<CompositeIndicatorsTable>;
+export type NewCompositeIndicator = Insertable<CompositeIndicatorsTable>;
+export type CompositeIndicatorUpdate = Updateable<CompositeIndicatorsTable>;
 
 // ============================================================================
 // Sync Result Types

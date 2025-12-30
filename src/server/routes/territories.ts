@@ -274,4 +274,138 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
       };
     }
   );
+
+  const AvailableDataQuerySchema = Type.Intersect([
+    PaginationQuerySchema,
+    Type.Object({
+      locale: Type.Optional(LocaleSchema),
+    }),
+  ]);
+
+  type AvailableDataQuery = Static<typeof AvailableDataQuerySchema>;
+
+  /**
+   * GET /api/v1/territories/:id/available-data
+   * Get matrices with data available for a territory
+   */
+  app.get<{
+    Params: Static<typeof IdParamSchema>;
+    Querystring: AvailableDataQuery;
+  }>(
+    "/territories/:id/available-data",
+    {
+      schema: {
+        summary: "Get available data for territory",
+        description:
+          "Get all matrices that have statistical data available for a specific territory. " +
+          "Includes data point counts and year ranges. " +
+          "Example: Get all matrices with data for Bucharest.",
+        tags: ["Territories"],
+        params: IdParamSchema,
+        querystring: AvailableDataQuerySchema,
+      },
+    },
+    async (request) => {
+      const id = Number.parseInt(request.params.id, 10);
+      const locale = request.query.locale ?? "ro";
+      const limit = parseLimit(request.query.limit, 50, 100);
+      const cursorPayload = validateCursor(request.query.cursor);
+
+      if (Number.isNaN(id)) {
+        throw new NotFoundError("Invalid territory ID");
+      }
+
+      // Get territory
+      const territory = await db
+        .selectFrom("territories")
+        .select(["id", "code", "names", "level", "path"])
+        .where("id", "=", id)
+        .executeTakeFirst();
+
+      if (!territory) {
+        throw new NotFoundError(`Territory with ID ${String(id)} not found`);
+      }
+
+      // Find all matrices with data for this territory
+      let query = db
+        .selectFrom("statistics")
+        .innerJoin("matrices", "statistics.matrix_id", "matrices.id")
+        .innerJoin(
+          "time_periods",
+          "statistics.time_period_id",
+          "time_periods.id"
+        )
+        .leftJoin("contexts", "matrices.context_id", "contexts.id")
+        .select([
+          "matrices.id",
+          "matrices.ins_code",
+          "matrices.metadata",
+          "contexts.names as context_names",
+          sql<number>`COUNT(DISTINCT statistics.id)`.as("data_point_count"),
+          sql<number>`COUNT(DISTINCT time_periods.year)`.as("year_count"),
+          sql<number>`MIN(time_periods.year)`.as("min_year"),
+          sql<number>`MAX(time_periods.year)`.as("max_year"),
+        ])
+        .where("statistics.territory_id", "=", id)
+        .groupBy([
+          "matrices.id",
+          "matrices.ins_code",
+          "matrices.metadata",
+          "contexts.names",
+        ]);
+
+      // Apply cursor pagination
+      if (cursorPayload) {
+        query = query.having("matrices.id", ">", cursorPayload.id);
+      }
+
+      const rows = await query
+        .orderBy("matrices.id", "asc")
+        .limit(limit + 1)
+        .execute();
+
+      const hasMore = rows.length > limit;
+      const items = rows.slice(0, limit).map((m) => {
+        const metadata = m.metadata;
+        const contextNames = m.context_names;
+
+        return {
+          id: m.id,
+          insCode: m.ins_code,
+          name:
+            locale === "en" && metadata.names.en
+              ? metadata.names.en
+              : metadata.names.ro,
+          contextName: contextNames
+            ? locale === "en" && contextNames.en
+              ? contextNames.en
+              : contextNames.ro
+            : null,
+          periodicity: metadata.periodicity ?? [],
+          dataPointCount: m.data_point_count,
+          yearCount: m.year_count,
+          yearRange: {
+            min: m.min_year,
+            max: m.max_year,
+          },
+        };
+      });
+
+      return {
+        data: items,
+        meta: {
+          territory: {
+            id: territory.id,
+            code: territory.code,
+            name:
+              locale === "en" && territory.names.en
+                ? territory.names.en
+                : territory.names.ro,
+            level: territory.level,
+          },
+          pagination: createPaginationMeta(items, limit, "id", hasMore),
+        },
+      };
+    }
+  );
 }

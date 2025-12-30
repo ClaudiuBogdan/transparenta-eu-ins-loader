@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { logger } from "../logger.js";
 import { closeConnection, pool } from "./connection.js";
 
+import type { PoolClient } from "pg";
+
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDirPath = dirname(currentFilePath);
 
@@ -39,6 +41,9 @@ export async function runMigration(options?: {
     await client.query("COMMIT");
 
     logger.info("Schema migration completed successfully");
+
+    // Create partitions in batches to avoid max_locks_per_transaction limit
+    await createPartitionsInBatches(client);
   } catch (error) {
     await client.query("ROLLBACK");
     logger.error({ error }, "Schema migration failed");
@@ -46,6 +51,36 @@ export async function runMigration(options?: {
   } finally {
     client.release();
   }
+}
+
+/**
+ * Create statistics partitions in batches to avoid PostgreSQL lock limits.
+ * Creates partitions for matrix IDs 1-2000 in batches of 50.
+ */
+async function createPartitionsInBatches(client: PoolClient): Promise<void> {
+  const TOTAL_PARTITIONS = 2000;
+  const BATCH_SIZE = 50;
+
+  logger.info(
+    `Creating ${String(TOTAL_PARTITIONS)} partitions in batches of ${String(BATCH_SIZE)}...`
+  );
+
+  for (let start = 1; start <= TOTAL_PARTITIONS; start += BATCH_SIZE) {
+    const end = Math.min(start + BATCH_SIZE - 1, TOTAL_PARTITIONS);
+
+    await client.query("BEGIN");
+    await client.query(`SELECT create_partition_batch($1, $2)`, [start, end]);
+    await client.query("COMMIT");
+
+    // Log progress every 500 partitions
+    if (end % 500 === 0 || end === TOTAL_PARTITIONS) {
+      logger.info(`  Created partitions ${String(start)}-${String(end)}`);
+    }
+  }
+
+  logger.info(
+    `Partition initialization complete (1-${String(TOTAL_PARTITIONS)})`
+  );
 }
 
 /**

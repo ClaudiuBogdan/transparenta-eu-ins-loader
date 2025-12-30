@@ -4,10 +4,15 @@
 
 import { Type } from "@sinclair/typebox";
 
+import { registerAnalyticsRoutes } from "./analytics.js";
 import { registerClassificationRoutes } from "./classifications.js";
 import { registerContextRoutes } from "./contexts.js";
+import { registerDiscoverRoutes } from "./discover.js";
+import { registerIndicatorRoutes } from "./indicators.js";
 import { registerMatrixRoutes } from "./matrices.js";
+import { registerQueryRoutes } from "./queries.js";
 import { registerStatisticsRoutes } from "./statistics.js";
+import { registerTagRoutes } from "./tags.js";
 import { registerTerritoryRoutes } from "./territories.js";
 import { registerTimePeriodRoutes } from "./time-periods.js";
 
@@ -46,7 +51,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   // API v1 routes
   await app.register(
     (api) => {
-      // Discovery endpoints
+      // Core navigation endpoints
       registerContextRoutes(api);
       registerMatrixRoutes(api);
 
@@ -57,6 +62,13 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
 
       // Data query endpoints
       registerStatisticsRoutes(api);
+
+      // Discovery & Analytics endpoints (new)
+      registerDiscoverRoutes(api);
+      registerAnalyticsRoutes(api);
+      registerIndicatorRoutes(api);
+      registerTagRoutes(api);
+      registerQueryRoutes(api);
     },
     { prefix: "/api/v1" }
   );

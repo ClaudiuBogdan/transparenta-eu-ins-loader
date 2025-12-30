@@ -455,6 +455,398 @@ No manual partition creation is needed for most use cases.
       }
     });
 
+  // sync data-all - bulk sync statistical data for all matrices with metadata
+  sync
+    .command("data-all")
+    .description(
+      "Sync statistical data for ALL matrices with metadata (initial bulk sync)"
+    )
+    .option("--years <range>", "Year range, e.g., 2020-2024")
+    .option("--limit <n>", "Limit number of matrices to sync", parseInt)
+    .option(
+      "--continue-on-error",
+      "Continue syncing even if individual matrices fail"
+    )
+    .action(
+      async (options: {
+        years?: string;
+        limit?: number;
+        continueOnError?: boolean;
+      }) => {
+        const spinner = ora("Preparing bulk data sync...").start();
+
+        try {
+          // Parse year range
+          let yearFrom: number | undefined;
+          let yearTo: number | undefined;
+          if (options.years) {
+            const [from, to] = options.years
+              .split("-")
+              .map((s) => parseInt(s, 10));
+            yearFrom = from;
+            yearTo = to ?? from;
+          }
+
+          // Get all matrices with sync_status = 'SYNCED' (metadata ready)
+          let query = db
+            .selectFrom("matrices")
+            .select(["id", "ins_code", "metadata"])
+            .where("sync_status", "=", "SYNCED")
+            .orderBy("ins_code");
+
+          if (options.limit !== undefined) {
+            query = query.limit(options.limit);
+          }
+
+          const matrices = await query.execute();
+
+          if (matrices.length === 0) {
+            spinner.fail(
+              "No matrices with synced metadata found. Run 'pnpm cli sync all' first."
+            );
+            process.exitCode = 1;
+            return;
+          }
+
+          // Check which matrices have partitions
+          const existingPartitions = await sql<{ tablename: string }>`
+            SELECT tablename FROM pg_tables
+            WHERE schemaname = 'public' AND tablename LIKE 'statistics_matrix_%'
+          `.execute(db);
+
+          const partitionSet = new Set(
+            existingPartitions.rows.map((p) => p.tablename)
+          );
+
+          const matricesWithPartitions = matrices.filter((m) =>
+            partitionSet.has(`statistics_matrix_${String(m.id)}`)
+          );
+
+          const skippedNoPartition =
+            matrices.length - matricesWithPartitions.length;
+
+          spinner.succeed(
+            `Found ${String(matricesWithPartitions.length)} matrices ready for data sync`
+          );
+
+          if (skippedNoPartition > 0) {
+            console.log(
+              `  ⚠️  Skipping ${String(skippedNoPartition)} matrices without partitions`
+            );
+          }
+
+          const yearsDisplay = options.years ?? "all years";
+          console.log("\n" + "═".repeat(80));
+          console.log("BULK DATA SYNC");
+          console.log("═".repeat(80));
+          console.log(`  Matrices:  ${String(matricesWithPartitions.length)}`);
+          console.log(`  Years:     ${yearsDisplay}`);
+          console.log("═".repeat(80) + "\n");
+
+          const dataService = new DataSyncService(db);
+          let successCount = 0;
+          let failedCount = 0;
+          const failedMatrices: string[] = [];
+          let totalInserted = 0;
+          let totalUpdated = 0;
+
+          const startTime = Date.now();
+
+          for (let i = 0; i < matricesWithPartitions.length; i++) {
+            const matrix = matricesWithPartitions[i];
+            if (!matrix) continue;
+
+            const progress = `[${String(i + 1)}/${String(matricesWithPartitions.length)}]`;
+            const name =
+              (matrix.metadata as { names?: { ro?: string } })?.names?.ro ??
+              matrix.ins_code;
+            const displayName =
+              name.length > 40 ? name.slice(0, 37) + "..." : name;
+
+            spinner.start(
+              `${progress} Syncing ${matrix.ins_code} - ${displayName}`
+            );
+
+            try {
+              const result = await dataService.syncData({
+                matrixCode: matrix.ins_code,
+                yearFrom,
+                yearTo,
+                onProgress: (p) => {
+                  spinner.text = `${progress} ${matrix.ins_code}: ${p.phase} ${String(p.current)}/${String(p.total)}`;
+                },
+              });
+
+              totalInserted += result.rowsInserted;
+              totalUpdated += result.rowsUpdated;
+              successCount++;
+
+              spinner.succeed(
+                `${progress} ${matrix.ins_code}: +${String(result.rowsInserted)} inserted, ${String(result.rowsUpdated)} updated`
+              );
+            } catch (error) {
+              failedCount++;
+              failedMatrices.push(matrix.ins_code);
+
+              const errorMsg =
+                error instanceof Error ? error.message : String(error);
+              spinner.fail(`${progress} ${matrix.ins_code}: ${errorMsg}`);
+
+              if (options.continueOnError !== true) {
+                console.log(
+                  "\nStopping due to error. Use --continue-on-error to skip failures."
+                );
+                break;
+              }
+            }
+          }
+
+          const duration = Math.round((Date.now() - startTime) / 1000);
+          const hours = Math.floor(duration / 3600);
+          const minutes = Math.floor((duration % 3600) / 60);
+          const seconds = duration % 60;
+
+          console.log("\n" + "═".repeat(80));
+          console.log("BULK SYNC COMPLETE");
+          console.log("═".repeat(80));
+          console.log(`  Success:   ${String(successCount)} matrices`);
+          console.log(`  Failed:    ${String(failedCount)} matrices`);
+          console.log(`  Inserted:  ${String(totalInserted)} rows`);
+          console.log(`  Updated:   ${String(totalUpdated)} rows`);
+          console.log(
+            `  Duration:  ${String(hours)}h ${String(minutes)}m ${String(seconds)}s`
+          );
+          console.log("═".repeat(80));
+
+          if (failedMatrices.length > 0) {
+            console.log("\nFailed matrices:");
+            for (const code of failedMatrices.slice(0, 20)) {
+              console.log(`  - ${code}`);
+            }
+            if (failedMatrices.length > 20) {
+              console.log(
+                `  ... and ${String(failedMatrices.length - 20)} more`
+              );
+            }
+            console.log("\nRetry failed matrices with:");
+            console.log(
+              `  for code in ${failedMatrices.slice(0, 10).join(" ")}; do pnpm cli sync data "$code" ${options.years ? `--years ${options.years}` : ""}; done`
+            );
+          }
+        } catch (error) {
+          spinner.fail(`Error: ${(error as Error).message}`);
+          process.exitCode = 1;
+        } finally {
+          await closeConnection();
+        }
+      }
+    );
+
+  // sync data-refresh - resync matrices that already have data
+  sync
+    .command("data-refresh")
+    .description("Re-sync data for matrices that already have statistical data")
+    .option("--years <range>", "Year range, e.g., 2020-2024")
+    .option("--stale-only", "Only refresh matrices marked as STALE")
+    .option(
+      "--older-than <days>",
+      "Refresh matrices synced more than N days ago",
+      parseInt
+    )
+    .option("--limit <n>", "Limit number of matrices to refresh", parseInt)
+    .option(
+      "--continue-on-error",
+      "Continue syncing even if individual matrices fail"
+    )
+    .action(
+      async (options: {
+        years?: string;
+        staleOnly?: boolean;
+        olderThan?: number;
+        limit?: number;
+        continueOnError?: boolean;
+      }) => {
+        const spinner = ora("Finding matrices to refresh...").start();
+
+        try {
+          // Parse year range
+          let yearFrom: number | undefined;
+          let yearTo: number | undefined;
+          if (options.years) {
+            const [from, to] = options.years
+              .split("-")
+              .map((s) => parseInt(s, 10));
+            yearFrom = from;
+            yearTo = to ?? from;
+          }
+
+          // Find matrices that have statistics data
+          // Join with statistics to find matrices with actual data
+          let query = db
+            .selectFrom("matrices")
+            .innerJoin("statistics", "matrices.id", "statistics.matrix_id")
+            .select([
+              "matrices.id",
+              "matrices.ins_code",
+              "matrices.metadata",
+              "matrices.sync_status",
+              "matrices.last_sync_at",
+            ])
+            .distinct()
+            .orderBy("matrices.ins_code");
+
+          // Apply filters
+          if (options.staleOnly === true) {
+            query = query.where("matrices.sync_status", "=", "STALE");
+          } else {
+            query = query.where("matrices.sync_status", "in", [
+              "SYNCED",
+              "STALE",
+            ]);
+          }
+
+          if (options.olderThan !== undefined) {
+            const cutoffDate = new Date();
+            cutoffDate.setDate(cutoffDate.getDate() - options.olderThan);
+            query = query.where("matrices.last_sync_at", "<", cutoffDate);
+          }
+
+          if (options.limit !== undefined) {
+            query = query.limit(options.limit);
+          }
+
+          const matrices = await query.execute();
+
+          if (matrices.length === 0) {
+            spinner.info("No matrices found matching refresh criteria.");
+            if (options.staleOnly === true) {
+              console.log("  No matrices are marked as STALE.");
+            }
+            if (options.olderThan !== undefined) {
+              console.log(
+                `  No matrices were synced more than ${String(options.olderThan)} days ago.`
+              );
+            }
+            console.log("\nTo sync data for the first time, use:");
+            console.log("  pnpm cli sync data-all");
+            return;
+          }
+
+          spinner.succeed(
+            `Found ${String(matrices.length)} matrices with data to refresh`
+          );
+
+          const yearsDisplay = options.years ?? "all years";
+          console.log("\n" + "═".repeat(80));
+          console.log("DATA REFRESH");
+          console.log("═".repeat(80));
+          console.log(`  Matrices:  ${String(matrices.length)}`);
+          console.log(`  Years:     ${yearsDisplay}`);
+          if (options.staleOnly === true) {
+            console.log("  Filter:    STALE only");
+          }
+          if (options.olderThan !== undefined) {
+            console.log(
+              `  Filter:    Older than ${String(options.olderThan)} days`
+            );
+          }
+          console.log("═".repeat(80) + "\n");
+
+          const dataService = new DataSyncService(db);
+          let successCount = 0;
+          let failedCount = 0;
+          const failedMatrices: string[] = [];
+          let totalInserted = 0;
+          let totalUpdated = 0;
+
+          const startTime = Date.now();
+
+          for (let i = 0; i < matrices.length; i++) {
+            const matrix = matrices[i];
+            if (!matrix) continue;
+
+            const progress = `[${String(i + 1)}/${String(matrices.length)}]`;
+            const name =
+              (matrix.metadata as { names?: { ro?: string } })?.names?.ro ??
+              matrix.ins_code;
+            const displayName =
+              name.length > 40 ? name.slice(0, 37) + "..." : name;
+
+            spinner.start(
+              `${progress} Refreshing ${matrix.ins_code} - ${displayName}`
+            );
+
+            try {
+              const result = await dataService.syncData({
+                matrixCode: matrix.ins_code,
+                yearFrom,
+                yearTo,
+                onProgress: (p) => {
+                  spinner.text = `${progress} ${matrix.ins_code}: ${p.phase} ${String(p.current)}/${String(p.total)}`;
+                },
+              });
+
+              totalInserted += result.rowsInserted;
+              totalUpdated += result.rowsUpdated;
+              successCount++;
+
+              spinner.succeed(
+                `${progress} ${matrix.ins_code}: +${String(result.rowsInserted)} inserted, ${String(result.rowsUpdated)} updated`
+              );
+            } catch (error) {
+              failedCount++;
+              failedMatrices.push(matrix.ins_code);
+
+              const errorMsg =
+                error instanceof Error ? error.message : String(error);
+              spinner.fail(`${progress} ${matrix.ins_code}: ${errorMsg}`);
+
+              if (options.continueOnError !== true) {
+                console.log(
+                  "\nStopping due to error. Use --continue-on-error to skip failures."
+                );
+                break;
+              }
+            }
+          }
+
+          const duration = Math.round((Date.now() - startTime) / 1000);
+          const hours = Math.floor(duration / 3600);
+          const minutes = Math.floor((duration % 3600) / 60);
+          const seconds = duration % 60;
+
+          console.log("\n" + "═".repeat(80));
+          console.log("REFRESH COMPLETE");
+          console.log("═".repeat(80));
+          console.log(`  Success:   ${String(successCount)} matrices`);
+          console.log(`  Failed:    ${String(failedCount)} matrices`);
+          console.log(`  Inserted:  ${String(totalInserted)} rows`);
+          console.log(`  Updated:   ${String(totalUpdated)} rows`);
+          console.log(
+            `  Duration:  ${String(hours)}h ${String(minutes)}m ${String(seconds)}s`
+          );
+          console.log("═".repeat(80));
+
+          if (failedMatrices.length > 0) {
+            console.log("\nFailed matrices:");
+            for (const code of failedMatrices.slice(0, 20)) {
+              console.log(`  - ${code}`);
+            }
+            if (failedMatrices.length > 20) {
+              console.log(
+                `  ... and ${String(failedMatrices.length - 20)} more`
+              );
+            }
+          }
+        } catch (error) {
+          spinner.fail(`Error: ${(error as Error).message}`);
+          process.exitCode = 1;
+        } finally {
+          await closeConnection();
+        }
+      }
+    );
+
   // sync status
   sync
     .command("status")
@@ -675,6 +1067,330 @@ TROUBLESHOOTING
         spinner.succeed("Full sync completed");
       } catch (error) {
         spinner.fail(`Sync failed: ${(error as Error).message}`);
+        process.exitCode = 1;
+      } finally {
+        await closeConnection();
+      }
+    });
+
+  // sync worker - process queued sync jobs
+  sync
+    .command("worker")
+    .description(
+      "Process queued sync jobs (runs continuously until queue is empty)"
+    )
+    .option("--once", "Process one job and exit")
+    .option("--limit <n>", "Maximum number of jobs to process", Number.parseInt)
+    .option(
+      "--poll-interval <ms>",
+      "Interval to poll for new jobs (default: 5000ms)",
+      Number.parseInt
+    )
+    .action(
+      async (options: {
+        once?: boolean;
+        limit?: number;
+        pollInterval?: number;
+      }) => {
+        const pollInterval = options.pollInterval ?? 5000;
+        let processedCount = 0;
+        let running = true;
+
+        // Handle graceful shutdown
+        const shutdown = () => {
+          console.log("\n\nShutting down worker...");
+          running = false;
+        };
+        process.on("SIGINT", shutdown);
+        process.on("SIGTERM", shutdown);
+
+        console.log("\n" + "═".repeat(80));
+        console.log("SYNC JOB WORKER");
+        console.log("═".repeat(80));
+        console.log(
+          `  Mode:          ${options.once === true ? "Single job" : "Continuous"}`
+        );
+        if (options.limit !== undefined) {
+          console.log(`  Limit:         ${String(options.limit)} jobs`);
+        }
+        console.log(`  Poll interval: ${String(pollInterval)}ms`);
+        console.log("═".repeat(80) + "\n");
+
+        const dataService = new DataSyncService(db);
+
+        while (running) {
+          // Check limit
+          if (options.limit !== undefined && processedCount >= options.limit) {
+            console.log(
+              `\nReached job limit (${String(options.limit)}). Stopping.`
+            );
+            break;
+          }
+
+          // Get next pending job (highest priority, oldest first)
+          const job = await db
+            .selectFrom("sync_jobs")
+            .innerJoin("matrices", "sync_jobs.matrix_id", "matrices.id")
+            .select([
+              "sync_jobs.id",
+              "sync_jobs.matrix_id",
+              "sync_jobs.year_from",
+              "sync_jobs.year_to",
+              "matrices.ins_code",
+              "matrices.metadata",
+            ])
+            .where("sync_jobs.status", "=", "PENDING")
+            .orderBy("sync_jobs.priority", "desc")
+            .orderBy("sync_jobs.created_at", "asc")
+            .executeTakeFirst();
+
+          if (!job) {
+            if (options.once === true) {
+              console.log("No pending jobs in queue.");
+              break;
+            }
+            // Wait and poll again
+            await new Promise((resolve) => setTimeout(resolve, pollInterval));
+            continue;
+          }
+
+          const matrixName =
+            (job.metadata as { names?: { ro?: string } })?.names?.ro ??
+            job.ins_code;
+          const displayName =
+            matrixName.length > 50
+              ? matrixName.slice(0, 47) + "..."
+              : matrixName;
+
+          console.log(
+            `\n─────────────────────────────────────────────────────────────────────`
+          );
+          console.log(
+            `Job #${String(job.id)}: ${job.ins_code} - ${displayName}`
+          );
+          console.log(
+            `─────────────────────────────────────────────────────────────────────`
+          );
+
+          // Mark job as running
+          await db
+            .updateTable("sync_jobs")
+            .set({
+              status: "RUNNING",
+              started_at: new Date(),
+            })
+            .where("id", "=", job.id)
+            .execute();
+
+          const spinner = ora(`Syncing ${job.ins_code}...`).start();
+
+          try {
+            const result = await dataService.syncData({
+              matrixCode: job.ins_code,
+              yearFrom: job.year_from ?? undefined,
+              yearTo: job.year_to ?? undefined,
+              onProgress: (p) => {
+                spinner.text = `${job.ins_code}: ${p.phase} ${String(p.current)}/${String(p.total)}`;
+              },
+            });
+
+            // Mark job as completed
+            await db
+              .updateTable("sync_jobs")
+              .set({
+                status: "COMPLETED",
+                completed_at: new Date(),
+                rows_inserted: result.rowsInserted,
+                rows_updated: result.rowsUpdated,
+                error_message:
+                  result.errors.length > 0
+                    ? result.errors.slice(0, 5).join("; ")
+                    : null,
+              })
+              .where("id", "=", job.id)
+              .execute();
+
+            spinner.succeed(
+              `Job #${String(job.id)} completed: +${String(result.rowsInserted)} inserted, ${String(result.rowsUpdated)} updated`
+            );
+            processedCount++;
+          } catch (error) {
+            const errorMsg =
+              error instanceof Error ? error.message : String(error);
+
+            // Mark job as failed
+            await db
+              .updateTable("sync_jobs")
+              .set({
+                status: "FAILED",
+                completed_at: new Date(),
+                error_message: errorMsg.slice(0, 1000),
+              })
+              .where("id", "=", job.id)
+              .execute();
+
+            spinner.fail(`Job #${String(job.id)} failed: ${errorMsg}`);
+            processedCount++;
+          }
+
+          if (options.once === true) {
+            break;
+          }
+        }
+
+        // Summary
+        console.log("\n" + "═".repeat(80));
+        console.log("WORKER STOPPED");
+        console.log("═".repeat(80));
+        console.log(`  Jobs processed: ${String(processedCount)}`);
+        console.log("═".repeat(80));
+
+        await closeConnection();
+      }
+    );
+
+  // sync jobs - list queued jobs
+  sync
+    .command("jobs")
+    .description("List sync jobs in the queue")
+    .option(
+      "--status <status>",
+      "Filter by status (PENDING, RUNNING, COMPLETED, FAILED, CANCELLED)"
+    )
+    .option(
+      "--limit <n>",
+      "Number of jobs to show (default: 20)",
+      Number.parseInt
+    )
+    .action(async (options: { status?: string; limit?: number }) => {
+      try {
+        const limit = options.limit ?? 20;
+
+        let query = db
+          .selectFrom("sync_jobs")
+          .innerJoin("matrices", "sync_jobs.matrix_id", "matrices.id")
+          .select([
+            "sync_jobs.id",
+            "sync_jobs.status",
+            "sync_jobs.priority",
+            "sync_jobs.created_at",
+            "sync_jobs.started_at",
+            "sync_jobs.completed_at",
+            "sync_jobs.rows_inserted",
+            "sync_jobs.rows_updated",
+            "sync_jobs.error_message",
+            "matrices.ins_code",
+            "matrices.metadata",
+          ])
+          .orderBy("sync_jobs.created_at", "desc")
+          .limit(limit);
+
+        if (options.status !== undefined) {
+          const validStatuses = [
+            "PENDING",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED",
+          ];
+          if (!validStatuses.includes(options.status.toUpperCase())) {
+            console.error(
+              `Invalid status. Must be one of: ${validStatuses.join(", ")}`
+            );
+            process.exitCode = 1;
+            return;
+          }
+          query = query.where(
+            "sync_jobs.status",
+            "=",
+            options.status.toUpperCase() as
+              | "PENDING"
+              | "RUNNING"
+              | "COMPLETED"
+              | "FAILED"
+              | "CANCELLED"
+          );
+        }
+
+        const jobs = await query.execute();
+
+        // Get queue summary
+        const queueSummary = await db
+          .selectFrom("sync_jobs")
+          .select(["status", sql<number>`COUNT(*)::int`.as("count")])
+          .groupBy("status")
+          .execute();
+
+        console.log("\n" + "═".repeat(100));
+        console.log("SYNC JOB QUEUE");
+        console.log("═".repeat(100));
+
+        // Print summary
+        const counts: Record<string, number> = {};
+        for (const row of queueSummary) {
+          counts[row.status] = row.count;
+        }
+        console.log(
+          `  PENDING: ${String(counts.PENDING ?? 0).padEnd(5)} | ` +
+            `RUNNING: ${String(counts.RUNNING ?? 0).padEnd(5)} | ` +
+            `COMPLETED: ${String(counts.COMPLETED ?? 0).padEnd(5)} | ` +
+            `FAILED: ${String(counts.FAILED ?? 0).padEnd(5)} | ` +
+            `CANCELLED: ${String(counts.CANCELLED ?? 0)}`
+        );
+        console.log("═".repeat(100));
+
+        if (jobs.length === 0) {
+          console.log("\nNo jobs found matching criteria.");
+        } else {
+          console.log(
+            "\n" +
+              "ID".padEnd(8) +
+              "Status".padEnd(12) +
+              "Matrix".padEnd(12) +
+              "Priority".padEnd(10) +
+              "Created".padEnd(12) +
+              "Rows".padEnd(12) +
+              "Name"
+          );
+          console.log("─".repeat(100));
+
+          for (const job of jobs) {
+            const name =
+              (job.metadata as { names?: { ro?: string } })?.names?.ro ??
+              job.ins_code;
+            const displayName =
+              name.length > 30 ? name.slice(0, 27) + "..." : name;
+            const created = job.created_at.toISOString().split("T")[0] ?? "";
+            const rows =
+              job.status === "COMPLETED"
+                ? `+${String(job.rows_inserted)}/${String(job.rows_updated)}`
+                : "-";
+
+            console.log(
+              String(job.id).padEnd(8) +
+                job.status.padEnd(12) +
+                job.ins_code.padEnd(12) +
+                String(job.priority).padEnd(10) +
+                created.padEnd(12) +
+                rows.padEnd(12) +
+                displayName
+            );
+          }
+
+          if (jobs.length === limit) {
+            console.log(`\n... (showing first ${String(limit)} results)`);
+          }
+        }
+
+        // Show worker hint if there are pending jobs
+        if ((counts.PENDING ?? 0) > 0 || (counts.RUNNING ?? 0) > 0) {
+          console.log("\n" + "─".repeat(100));
+          console.log("To process queued jobs, run:");
+          console.log("  pnpm cli sync worker");
+          console.log("─".repeat(100));
+        }
+      } catch (error) {
+        console.error(`Error: ${(error as Error).message}`);
         process.exitCode = 1;
       } finally {
         await closeConnection();

@@ -12,6 +12,7 @@ import { registerIndicatorRoutes } from "./indicators.js";
 import { registerMatrixRoutes } from "./matrices.js";
 import { registerQueryRoutes } from "./queries.js";
 import { registerStatisticsRoutes } from "./statistics.js";
+import { registerSyncRoutes } from "./sync.js";
 import { registerTagRoutes } from "./tags.js";
 import { registerTerritoryRoutes } from "./territories.js";
 import { registerTimePeriodRoutes } from "./time-periods.js";
@@ -69,6 +70,9 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       registerIndicatorRoutes(api);
       registerTagRoutes(api);
       registerQueryRoutes(api);
+
+      // Sync management endpoints
+      registerSyncRoutes(api);
     },
     { prefix: "/api/v1" }
   );

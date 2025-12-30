@@ -27,11 +27,69 @@ pnpm install
 
 # Configure database (copy and edit .env)
 cp .env.example .env
+```
 
-# Run migrations
+### Database Setup
+
+The project uses PostgreSQL 16+ with extensions for hierarchical data and text search. Use Docker for the easiest setup:
+
+```bash
+# Start PostgreSQL with Docker (recommended)
+docker compose up -d
+
+# Wait for PostgreSQL to be ready
+docker compose exec postgres pg_isready -U ins_tempo
+```
+
+Or connect to an existing PostgreSQL instance by editing `.env`:
+
+```env
+DATABASE_URL=postgresql://user:password@host:5432/database
+```
+
+### Database Migration
+
+Run migrations to create the schema (tables, views, indexes, partitions):
+
+```bash
+# Run migrations (creates ~2000 partitions, may take 1-2 minutes)
 pnpm db:migrate
 
-# Start development server
+# To reset the database and run fresh migration
+pnpm db:migrate --fresh
+```
+
+The migration creates:
+
+- Core tables: `contexts`, `matrices`, `territories`, `time_periods`, `statistics`
+- 2000 pre-created partitions for the `statistics` table
+- Materialized views for analytics
+- Seed data for classification types and units of measure
+
+### Initial Data Sync
+
+After migration, sync metadata from the INS Tempo API:
+
+```bash
+# 1. Full sync (contexts, territories, matrices catalog & metadata)
+pnpm cli sync all
+
+# OR step-by-step approach:
+pnpm cli sync contexts                        # Domain hierarchy (~340)
+pnpm cli sync territories                     # NUTS hierarchy (55)
+pnpm cli sync matrices                        # Matrix catalog only (~1,898)
+pnpm cli sync matrices --full --skip-existing # Detailed metadata (slow)
+
+# 2. Sync statistical data for specific matrices
+pnpm cli sync data POP105A                    # Population by counties
+pnpm cli sync data POP105A --years 2020-2024  # Specific year range
+```
+
+**Note:** The INS API has a 750ms rate limit between requests. Full metadata sync (`sync all`) takes ~4 hours.
+
+### Start Development Server
+
+```bash
 pnpm dev
 ```
 
@@ -202,9 +260,123 @@ contexts (8 domains, ~340 subcategories)
 This project syncs data from the INS Tempo API at `http://statistici.insse.ro:8077/tempo-ins/`.
 
 Key constraints:
+
 - **Rate limit:** 750ms delay between requests (enforced)
 - **30,000 cell limit:** Large queries must be chunked
 - **No authentication required**
+
+## Data Sync Strategy
+
+### Lazy Loading / On-Demand Sync
+
+Not all ~1,898 matrices have statistical data synced by default. The project uses a **lazy loading** approach:
+
+1. **Metadata is synced for all matrices** - Names, dimensions, classifications
+2. **Statistical data is synced on-demand** - Only for matrices you need
+
+This approach is intentional because:
+
+- Full data sync for all matrices takes 2-7 days
+- Not all matrices are relevant for every use case
+- Storage requirements are significantly reduced (~120GB for full sync)
+
+### Sync Commands
+
+```bash
+# 1. Sync metadata for all matrices (required first step)
+pnpm cli sync all
+
+# 2. Sync data for individual matrices
+pnpm cli sync data POP105A --years 2020-2024
+
+# 3. Bulk sync all matrices with metadata
+pnpm cli sync data-all --years 2020-2024 --continue-on-error
+
+# 4. Refresh previously synced matrices only
+pnpm cli sync data-refresh --years 2020-2024
+pnpm cli sync data-refresh --older-than 30   # Refresh stale data
+pnpm cli sync data-refresh --stale-only      # Only STALE status
+
+# 5. Priority matrices script (30 key datasets)
+./scripts/sync-priority-matrices.sh 2020-2024
+```
+
+### Checking Sync Status
+
+**Via CLI:**
+
+```bash
+pnpm cli sync status           # Overview of all matrices
+pnpm cli sync status --failed  # Show only failed syncs
+```
+
+**Via API:**
+
+```bash
+# Get sync status summary
+curl http://localhost:3000/api/v1/sync/status
+```
+
+### Queue-Based Sync API
+
+Data sync requests go through a job queue to prevent INS API rate limiting and duplicate requests.
+
+**Queue a sync job:**
+
+```bash
+# Request data sync (returns job ID immediately)
+curl -X POST http://localhost:3000/api/v1/sync/data/POP105A \
+  -H "Content-Type: application/json" \
+  -d '{"yearFrom": 2020, "yearTo": 2024}'
+
+# Response:
+# {"data":{"jobId":1,"status":"PENDING","message":"Sync job queued"}}
+```
+
+**Check job status:**
+
+```bash
+# Get specific job status
+curl http://localhost:3000/api/v1/sync/jobs/1
+
+# List all jobs (with optional filters)
+curl "http://localhost:3000/api/v1/sync/jobs?status=PENDING&limit=20"
+
+# Cancel a pending job
+curl -X DELETE http://localhost:3000/api/v1/sync/jobs/1
+```
+
+**Process the queue (run worker):**
+
+```bash
+# Start sync worker (processes jobs until queue is empty)
+pnpm cli sync worker
+
+# Process one job and exit
+pnpm cli sync worker --once
+
+# Process max 10 jobs
+pnpm cli sync worker --limit 10
+
+# List queued jobs
+pnpm cli sync jobs
+pnpm cli sync jobs --status PENDING
+```
+
+**Job states:** `PENDING` → `RUNNING` → `COMPLETED` | `FAILED` | `CANCELLED`
+
+**Duplicate prevention:** If a sync job for the same matrix is already pending or running, the API returns the existing job ID instead of creating a duplicate.
+
+### Resync Strategy
+
+The resync strategy distinguishes between:
+
+- **PENDING** - Metadata not synced, skip during data refresh
+- **SYNCED** - Ready for data sync or refresh
+- **FAILED** - Needs manual retry
+- **STALE** - Needs refresh (data may be outdated)
+
+Use `data-refresh` to only resync matrices that already have data, ignoring PENDING matrices that may not be needed.
 
 ## License
 

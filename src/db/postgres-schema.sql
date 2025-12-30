@@ -358,6 +358,40 @@ CREATE TABLE sync_checkpoints (
 
 CREATE INDEX idx_sync_checkpoints_matrix ON sync_checkpoints(matrix_id);
 
+-- Sync job status enum
+CREATE TYPE sync_job_status AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED');
+
+-- Sync jobs queue table
+CREATE TABLE sync_jobs (
+    id SERIAL PRIMARY KEY,
+    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
+    status sync_job_status NOT NULL DEFAULT 'PENDING',
+    year_from SMALLINT,
+    year_to SMALLINT,
+    priority SMALLINT NOT NULL DEFAULT 0,  -- Higher = more priority
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    rows_inserted INTEGER DEFAULT 0,
+    rows_updated INTEGER DEFAULT 0,
+    error_message TEXT,
+    created_by TEXT,  -- 'api', 'cli', etc.
+    CONSTRAINT chk_sync_jobs_dates CHECK (
+        (status = 'PENDING' AND started_at IS NULL AND completed_at IS NULL) OR
+        (status = 'RUNNING' AND started_at IS NOT NULL AND completed_at IS NULL) OR
+        (status IN ('COMPLETED', 'FAILED', 'CANCELLED') AND completed_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX idx_sync_jobs_matrix ON sync_jobs(matrix_id);
+CREATE INDEX idx_sync_jobs_status ON sync_jobs(status);
+CREATE INDEX idx_sync_jobs_pending ON sync_jobs(priority DESC, created_at ASC) WHERE status = 'PENDING';
+CREATE INDEX idx_sync_jobs_created ON sync_jobs(created_at DESC);
+
+-- Prevent duplicate pending/running jobs for same matrix
+CREATE UNIQUE INDEX idx_sync_jobs_active_matrix ON sync_jobs(matrix_id)
+    WHERE status IN ('PENDING', 'RUNNING');
+
 -- ============================================================================
 -- HELPER FUNCTIONS
 -- ============================================================================

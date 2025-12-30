@@ -341,6 +341,35 @@ export interface SyncCheckpointsTable {
   row_count: number;
 }
 
+/**
+ * Sync job status enum
+ */
+export type SyncJobStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+/**
+ * sync_jobs - Queue table for data sync jobs
+ */
+export interface SyncJobsTable {
+  id: Generated<number>;
+  matrix_id: number;
+  status: SyncJobStatus;
+  year_from: number | null;
+  year_to: number | null;
+  priority: number;
+  created_at: Generated<Date>;
+  started_at: Date | null;
+  completed_at: Date | null;
+  rows_inserted: number;
+  rows_updated: number;
+  error_message: string | null;
+  created_by: string | null;
+}
+
 // ============================================================================
 // DISCOVERY & ANALYTICS Tables
 // ============================================================================
@@ -479,6 +508,7 @@ export interface Database {
   statistics: StatisticsTable;
   statistic_classifications: StatisticClassificationsTable;
   sync_checkpoints: SyncCheckpointsTable;
+  sync_jobs: SyncJobsTable;
 
   // Discovery & Analytics
   matrix_tags: MatrixTagsTable;
@@ -564,6 +594,11 @@ export type NewStatisticClassification =
 export type SyncCheckpoint = Selectable<SyncCheckpointsTable>;
 export type NewSyncCheckpoint = Insertable<SyncCheckpointsTable>;
 export type SyncCheckpointUpdate = Updateable<SyncCheckpointsTable>;
+
+// Sync Jobs
+export type SyncJob = Selectable<SyncJobsTable>;
+export type NewSyncJob = Insertable<SyncJobsTable>;
+export type SyncJobUpdate = Updateable<SyncJobsTable>;
 
 // Matrix Tags
 export type MatrixTag = Selectable<MatrixTagsTable>;

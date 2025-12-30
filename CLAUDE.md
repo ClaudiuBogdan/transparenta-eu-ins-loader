@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-INS Tempo Scraper - a system for scraping Romanian statistical data from the INS (Institutul Național de Statistică) Tempo API. The INS API uses a multi-dimensional OLAP cube structure with hierarchical contexts, matrices (datasets), and dimensions.
+Transparenta EU INS Loader - a system for loading Romanian statistical data from the INS (Institutul Național de Statistică) Tempo API for the Transparenta.eu platform. The INS API uses a multi-dimensional OLAP cube structure with hierarchical contexts, matrices (datasets), and dimensions.
 
 ## Commands
 

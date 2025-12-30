@@ -1,7 +1,8 @@
 {
-  "name": "ins-tempo-scraper",
+  "name": "transparenta-eu-ins-loader",
   "version": "0.1.0",
-  "description": "INS Tempo API scraper for Romanian statistical data",
+  "description": "Romanian statistical data loader from INS Tempo API for Transparenta.eu",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -61,7 +62,7 @@
     "vitest": "^2.1.8"
   },
   "bin": {
-    "ins-cli": "./dist/cli/index.js"
+    "transparenta-ins": "./dist/cli/index.js"
   },
   "lint-staged": {
     "*.ts": [

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * INS Dataset Explorer CLI
+ * Transparenta EU INS Loader CLI
  *
- * Interactive CLI for exploring Romanian statistical datasets from INS Tempo.
+ * CLI for loading Romanian statistical datasets from INS Tempo for Transparenta.eu.
  */
 
 import { Command } from "commander";
@@ -20,8 +20,8 @@ import { registerSyncCommand } from "./commands/sync.js";
 const program = new Command();
 
 program
-  .name("ins-cli")
-  .description("CLI for exploring INS Tempo statistical datasets")
+  .name("transparenta-ins")
+  .description("Transparenta EU - INS Tempo statistical data loader CLI")
   .version("0.3.0");
 
 // Register all commands

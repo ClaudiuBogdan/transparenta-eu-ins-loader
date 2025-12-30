@@ -1,6 +1,6 @@
-# INS Statistical Data API
+# Transparenta EU INS Loader
 
-A REST API for Romanian statistical data from INS (Institutul National de Statistica). Syncs data from the INS Tempo API and exposes it through a modern, developer-friendly interface.
+Romanian statistical data loader from INS (Institutul National de Statistica) Tempo API for [Transparenta.eu](https://transparenta.eu). Syncs data from the INS Tempo API and exposes it through a modern, developer-friendly REST interface.
 
 ## Features
 

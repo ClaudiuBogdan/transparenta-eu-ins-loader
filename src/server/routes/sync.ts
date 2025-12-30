@@ -9,11 +9,20 @@ import { Type, type Static } from "@sinclair/typebox";
 import { sql } from "kysely";
 
 import { db } from "../../db/connection.js";
+import {
+  SYNC_DEFAULTS,
+  type SyncJobFlags,
+  type SyncJobStatus,
+} from "../../db/types.js";
 import { NotFoundError, ValidationError } from "../plugins/error-handler.js";
 import { MatrixStatusSchema, PaginationMetaSchema } from "../schemas/common.js";
 
-import type { SyncJobStatus } from "../../db/types.js";
 import type { FastifyInstance } from "fastify";
+
+// Re-export for use in this file
+const DEFAULT_YEAR_FROM = SYNC_DEFAULTS.yearFrom;
+const DEFAULT_YEAR_TO = SYNC_DEFAULTS.yearTo;
+const DEFAULT_FLAGS: SyncJobFlags = SYNC_DEFAULTS.flags;
 
 // ============================================================================
 // Schemas
@@ -85,6 +94,15 @@ const SyncDataParamsSchema = Type.Object({
 
 type SyncDataParams = Static<typeof SyncDataParamsSchema>;
 
+// Sync job flags schema
+const SyncJobFlagsSchema = Type.Object({
+  skipExisting: Type.Optional(Type.Boolean()),
+  force: Type.Optional(Type.Boolean()),
+  chunkSize: Type.Optional(Type.Number({ minimum: 100, maximum: 30000 })),
+  totalsOnly: Type.Optional(Type.Boolean()),
+  includeAllClassifications: Type.Optional(Type.Boolean()),
+});
+
 // POST /sync/data/:matrixCode body
 const SyncDataBodySchema = Type.Object({
   yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: 2100 })),
@@ -92,6 +110,7 @@ const SyncDataBodySchema = Type.Object({
   priority: Type.Optional(
     Type.Number({ minimum: -10, maximum: 10, default: 0 })
   ),
+  flags: Type.Optional(SyncJobFlagsSchema),
 });
 
 type SyncDataBody = Static<typeof SyncDataBodySchema>;
@@ -102,9 +121,10 @@ const SyncJobSchema = Type.Object({
   matrixCode: Type.String(),
   matrixName: Type.String(),
   status: SyncJobStatusSchema,
-  yearFrom: Type.Union([Type.Number(), Type.Null()]),
-  yearTo: Type.Union([Type.Number(), Type.Null()]),
+  yearFrom: Type.Number(),
+  yearTo: Type.Number(),
   priority: Type.Number(),
+  flags: SyncJobFlagsSchema,
   createdAt: Type.String({ format: "date-time" }),
   startedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
   completedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
@@ -164,6 +184,7 @@ function formatJob(
     year_from: number | null;
     year_to: number | null;
     priority: number;
+    flags: SyncJobFlags;
     created_at: Date;
     started_at: Date | null;
     completed_at: Date | null;
@@ -179,9 +200,10 @@ function formatJob(
     matrixCode,
     matrixName,
     status: job.status,
-    yearFrom: job.year_from,
-    yearTo: job.year_to,
+    yearFrom: job.year_from ?? DEFAULT_YEAR_FROM,
+    yearTo: job.year_to ?? DEFAULT_YEAR_TO,
     priority: job.priority,
+    flags: job.flags,
     createdAt: job.created_at.toISOString(),
     startedAt: job.started_at?.toISOString() ?? null,
     completedAt: job.completed_at?.toISOString() ?? null,
@@ -380,15 +402,25 @@ export function registerSyncRoutes(app: FastifyInstance): void {
     },
     async (request, reply) => {
       const { matrixCode } = request.params;
-      const { yearFrom, yearTo, priority = 0 } = request.body ?? {};
+      const { yearFrom, yearTo, priority = 0, flags } = request.body ?? {};
+
+      // Apply defaults for year range
+      const effectiveYearFrom = yearFrom ?? DEFAULT_YEAR_FROM;
+      const effectiveYearTo = yearTo ?? DEFAULT_YEAR_TO;
+
+      // Merge flags with defaults
+      const effectiveFlags: SyncJobFlags = {
+        ...DEFAULT_FLAGS,
+        ...flags,
+      };
 
       // Validate year range
-      if (yearFrom !== undefined && yearTo !== undefined && yearFrom > yearTo) {
+      if (effectiveYearFrom > effectiveYearTo) {
         throw new ValidationError(
           "yearFrom must be less than or equal to yearTo",
           {
-            yearFrom,
-            yearTo,
+            yearFrom: effectiveYearFrom,
+            yearTo: effectiveYearTo,
           }
         );
       }
@@ -451,15 +483,16 @@ export function registerSyncRoutes(app: FastifyInstance): void {
         });
       }
 
-      // Create new job
+      // Create new job with defaults applied
       const newJob = await db
         .insertInto("sync_jobs")
         .values({
           matrix_id: matrix.id,
           status: "PENDING",
-          year_from: yearFrom ?? null,
-          year_to: yearTo ?? null,
+          year_from: effectiveYearFrom,
+          year_to: effectiveYearTo,
           priority,
+          flags: effectiveFlags,
           rows_inserted: 0,
           rows_updated: 0,
           created_by: "api",
@@ -471,7 +504,7 @@ export function registerSyncRoutes(app: FastifyInstance): void {
         data: {
           job: formatJob(newJob, matrixCode, matrixName),
           isNewJob: true,
-          message: `Sync job created for matrix ${matrixCode}. Job ID: ${String(newJob.id)}. Run 'pnpm cli sync worker' to process the queue.`,
+          message: `Sync job created for matrix ${matrixCode} (years ${String(effectiveYearFrom)}-${String(effectiveYearTo)}). Job ID: ${String(newJob.id)}. Run 'pnpm cli sync worker' to process the queue.`,
         },
       });
     }
@@ -510,6 +543,7 @@ export function registerSyncRoutes(app: FastifyInstance): void {
           "sync_jobs.year_from",
           "sync_jobs.year_to",
           "sync_jobs.priority",
+          "sync_jobs.flags",
           "sync_jobs.created_at",
           "sync_jobs.started_at",
           "sync_jobs.completed_at",
@@ -564,6 +598,7 @@ export function registerSyncRoutes(app: FastifyInstance): void {
           "sync_jobs.year_from",
           "sync_jobs.year_to",
           "sync_jobs.priority",
+          "sync_jobs.flags",
           "sync_jobs.created_at",
           "sync_jobs.started_at",
           "sync_jobs.completed_at",

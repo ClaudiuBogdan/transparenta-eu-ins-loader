@@ -243,6 +243,7 @@ contexts (8 domains, ~340 subcategories)
 |----------|-------------|
 | [API_QUERY_SPECIFICATION.md](./docs/API_QUERY_SPECIFICATION.md) | Complete API reference with cURL examples |
 | [CLI_USAGE.md](./docs/CLI_USAGE.md) | CLI commands and data sync guide |
+| [SYNC_STRATEGY.md](./docs/SYNC_STRATEGY.md) | Progressive sync phases with size estimation |
 | [PARTITIONING.md](./docs/PARTITIONING.md) | Database partitioning strategy |
 | [INS_SPEC/](./docs/INS_SPEC/) | Original INS API documentation |
 

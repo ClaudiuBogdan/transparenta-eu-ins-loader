@@ -272,11 +272,13 @@ export class DataSyncService {
 
   /**
    * Parse CSV response from pivot endpoint
+   * Skips header row (first line contains column names)
    */
   private parseCsv(csvText: string): string[][] {
-    return csvText
-      .split("\n")
-      .filter((row) => row.trim() !== "")
+    const lines = csvText.split("\n").filter((row) => row.trim() !== "");
+    // Skip header row (first line)
+    return lines
+      .slice(1)
       .map((row) => row.split(", ").map((cell) => cell.trim()));
   }
 

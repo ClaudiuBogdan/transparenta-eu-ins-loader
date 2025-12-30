@@ -109,6 +109,12 @@ const sampleSyncJob = {
   year_from: 2020,
   year_to: 2024,
   priority: 0,
+  flags: {
+    skipExisting: false,
+    force: false,
+    totalsOnly: true,
+    includeAllClassifications: false,
+  },
   created_at: new Date("2024-01-15T10:00:00Z"),
   started_at: null,
   completed_at: null,

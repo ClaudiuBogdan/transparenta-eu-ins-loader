@@ -352,6 +352,39 @@ export type SyncJobStatus =
   | "CANCELLED";
 
 /**
+ * Sync job flags/options stored as JSONB
+ */
+export interface SyncJobFlags {
+  /** Skip rows that already exist (default: false) */
+  skipExisting?: boolean;
+  /** Force re-sync even if data exists (default: false) */
+  force?: boolean;
+  /** Chunk size for large queries (default: auto) */
+  chunkSize?: number;
+  /** Only sync TOTAL classification values (default: true) */
+  totalsOnly?: boolean;
+  /** Include all classification breakdowns (default: false) */
+  includeAllClassifications?: boolean;
+}
+
+/**
+ * Default sync configuration
+ */
+export const SYNC_DEFAULTS = {
+  /** Default start year when not specified */
+  yearFrom: 2020,
+  /** Default end year when not specified (current year) */
+  yearTo: new Date().getFullYear(),
+  /** Default sync flags */
+  flags: {
+    skipExisting: false,
+    force: false,
+    totalsOnly: true,
+    includeAllClassifications: false,
+  } satisfies SyncJobFlags,
+} as const;
+
+/**
  * sync_jobs - Queue table for data sync jobs
  */
 export interface SyncJobsTable {
@@ -361,6 +394,7 @@ export interface SyncJobsTable {
   year_from: number | null;
   year_to: number | null;
   priority: number;
+  flags: SyncJobFlags;
   created_at: Generated<Date>;
   started_at: Date | null;
   completed_at: Date | null;

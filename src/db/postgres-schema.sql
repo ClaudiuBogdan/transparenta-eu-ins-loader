@@ -369,6 +369,7 @@ CREATE TABLE sync_jobs (
     year_from SMALLINT,
     year_to SMALLINT,
     priority SMALLINT NOT NULL DEFAULT 0,  -- Higher = more priority
+    flags JSONB NOT NULL DEFAULT '{}',  -- Sync options: skipExisting, force, chunkSize, etc.
     created_at TIMESTAMPTZ DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
@@ -382,6 +383,9 @@ CREATE TABLE sync_jobs (
         (status IN ('COMPLETED', 'FAILED', 'CANCELLED') AND completed_at IS NOT NULL)
     )
 );
+
+-- Default sync configuration (year range defaults)
+COMMENT ON TABLE sync_jobs IS 'Queue table for data sync jobs. Default year range: 2020-current year when not specified.';
 
 CREATE INDEX idx_sync_jobs_matrix ON sync_jobs(matrix_id);
 CREATE INDEX idx_sync_jobs_status ON sync_jobs(status);

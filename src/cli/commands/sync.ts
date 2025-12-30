@@ -1136,6 +1136,7 @@ TROUBLESHOOTING
               "sync_jobs.matrix_id",
               "sync_jobs.year_from",
               "sync_jobs.year_to",
+              "sync_jobs.flags",
               "matrices.ins_code",
               "matrices.metadata",
             ])
@@ -1162,12 +1163,20 @@ TROUBLESHOOTING
               ? matrixName.slice(0, 47) + "..."
               : matrixName;
 
+          const yearRange = `${String(job.year_from ?? "all")}-${String(job.year_to ?? "all")}`;
+          const flagsSummary =
+            Object.entries(job.flags ?? {})
+              .filter(([, v]) => v === true)
+              .map(([k]) => k)
+              .join(", ") || "defaults";
+
           console.log(
             `\n─────────────────────────────────────────────────────────────────────`
           );
           console.log(
             `Job #${String(job.id)}: ${job.ins_code} - ${displayName}`
           );
+          console.log(`  Years: ${yearRange} | Flags: ${flagsSummary}`);
           console.log(
             `─────────────────────────────────────────────────────────────────────`
           );

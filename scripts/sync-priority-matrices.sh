@@ -3,40 +3,64 @@
 # Syncs priority matrices with statistical data from INS Tempo API
 #
 # Usage:
-#   ./scripts/sync-priority-matrices.sh              # Default: 2016-2024
-#   ./scripts/sync-priority-matrices.sh 2020-2024    # Custom year range
+#   ./scripts/sync-priority-matrices.sh              # Default: 2016-2026
+#   ./scripts/sync-priority-matrices.sh 2020-2026    # Custom year range
 
 set -e
 
-YEARS="${1:-2016-2024}"
+YEARS="${1:-2016-2026}"
 
 MATRICES=(
   # Population & Demographics
   "POP105A"   # Population by counties
   "POP107D"   # Population by localities (UAT level)
+  "POP108D"   # Mid-year population by localities (UAT level)
   "POP201A"   # Live births by counties
   "POP202A"   # Deaths by counties
   "POP206A"   # Natural increase by counties
   "POP301A"   # Internal migration by counties
 
-  # Labor Market
+  # Labor Market & Salaries (for income tax estimation)
   "SOM101B"   # Registered unemployed by counties
   "SOM103B"   # Unemployment rate by counties
-  "FOR101B"   # Labor force by counties
-  "FOR103A"   # Employment by counties
-  "FOM104B"   # Average net salary by counties
-  "FOM106D"   # Average salary by economic activity
+  "AMG110F"   # Employed population by age and sex (AMIGO survey)
+  "AMG1010"   # Labor force participation by sex and residence (AMIGO survey)
+  "FOM104B"   # Average employees by counties
+  "FOM104D"   # Average employees by counties and localities (UAT level)
+  "FOM104F"   # Average employees by NACE Rev.2 activities and counties
+  "FOM105A"   # Year-end employee count by counties
+  "FOM105F"   # Year-end employee count by NACE Rev.2 and counties
+  "FOM106D"   # Average net salary by economic activity
+  "FOM106E"   # Average net salary by NACE Rev.2 and counties
+  "FOM107E"   # Average gross salary by NACE Rev.2 and counties (for tax calc)
 
-  # Economy
-  "CON101C"   # GDP by regions
-  "CON103F"   # GDP per capita by regions
+  # Economy & Enterprises (for profit tax estimation)
+  "CON103I"   # GDP by macroregions, regions and counties (NACE Rev.2)
+  "CON103H"   # GDP per capita by regions (NACE Rev.2)
   "INT101I"   # Active enterprises by counties
-  "INT102I"   # New enterprises by counties
+  "INT101O"   # Active enterprises by counties (NACE Rev.2)
+  "INT101R"   # Active local units by counties (NACE Rev.2)
+  "INT102D"   # Personnel in local units by counties (NACE Rev.2)
+  "INT104D"   # Turnover of local units by counties (NACE Rev.2)
+
+  # Retail & Commerce (for TVA estimation)
+  "COM101B"   # Retail trade turnover by NACE Rev.2
+  "COM104B"   # Retail sales value by NACE Rev.2
+
+  # Transport & Vehicles (for fuel excise estimation)
+  "TRN102A"   # New passenger vehicle registrations by counties
+  "TRN102B"   # New cargo vehicle registrations by counties
+  "TRN103B"   # Registered vehicles by categories and counties
+  "TRN103D"   # Registered vehicles by fuel type
+
+  # Consumption (for alcohol/tobacco excise estimation)
+  "CLV104A"   # Average annual consumption per capita
+  "CLV105A"   # Durable goods per 1000 inhabitants
 
   # Education
   "SCL101A"   # Schools by counties
   "SCL103B"   # Pre-university students by counties
-  "SCL104J"   # Teaching staff by counties
+  "SCL104A"   # Teaching staff by counties and sex
   "SCL108A"   # Higher education students
 
   # Health

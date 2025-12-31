@@ -3,19 +3,31 @@
  *
  * Flow:
  * 1. Load matrix dimensions and nom_items from database
- * 2. Build encQuery selecting specific year ranges
- * 3. Query INS API pivot endpoint
- * 4. Parse CSV and map to canonical entities
- * 5. Insert into statistics table
+ * 2. Generate chunks (by county + year for UAT data)
+ * 3. For each chunk:
+ *    a. Check checkpoint - skip if already synced
+ *    b. Build encQuery with chunk selections
+ *    c. Query INS API pivot endpoint
+ *    d. Parse CSV and map to canonical entities
+ *    e. Insert into statistics table
+ *    f. Record checkpoint
+ * 4. Update coverage metrics
  */
 
 import { createHash } from "node:crypto";
 
+import { sql, type Kysely } from "kysely";
+
+import {
+  ChunkGenerator,
+  getChunkDisplayName,
+  type SyncChunk,
+  type ClassificationMode,
+} from "./chunking.js";
 import { apiLogger } from "../../logger.js";
 import { queryMatrix, buildEncQuery } from "../../scraper/client.js";
 
 import type { Database, DimensionType } from "../../db/types.js";
-import type { Kysely } from "kysely";
 
 // ============================================================================
 // Types
@@ -41,7 +53,61 @@ interface DataSyncOptions {
   matrixCode: string;
   yearFrom?: number;
   yearTo?: number;
+  /** Expand territorial dimension to all localities (UATs) instead of just national total */
+  expandTerritorial?: boolean;
+  /** County code (e.g., "AB" for Alba) to sync only that county's localities */
+  countyCode?: string;
   onProgress?: (progress: DataSyncProgress) => void;
+}
+
+/** Options for full matrix sync with chunking */
+export interface FullSyncOptions {
+  matrixCode: string;
+  yearFrom: number;
+  yearTo: number;
+  /** Sync all classifications or just totals */
+  classificationMode: ClassificationMode;
+  /** Specific county to sync (for targeted sync) */
+  countyCode?: string;
+  /** Resume from last checkpoint */
+  resume?: boolean;
+  /** Force re-sync even if checkpoints exist */
+  force?: boolean;
+  /** Enable verbose debug logging */
+  verbose?: boolean;
+  /** Progress callback */
+  onProgress?: (progress: FullSyncProgress) => void;
+}
+
+/** Progress for full sync */
+export interface FullSyncProgress {
+  phase: "planning" | "syncing" | "updating_coverage";
+  chunksCompleted: number;
+  chunksTotal: number;
+  currentChunk?: string;
+  rowsInserted: number;
+  rowsUpdated: number;
+  estimatedTimeRemaining?: string;
+}
+
+/** Result of full sync */
+export interface FullSyncResult {
+  chunksCompleted: number;
+  chunksSkipped: number;
+  chunksFailed: number;
+  rowsInserted: number;
+  rowsUpdated: number;
+  errors: string[];
+  duration: number;
+}
+
+/** Maps county info for county-specific sync */
+interface CountyInfo {
+  countyDimIndex: number;
+  localityDimIndex: number;
+  countyNomItemId: number;
+  countyTerritoryPath: string;
+  localityNomItemIds: number[];
 }
 
 interface DataSyncProgress {
@@ -62,19 +128,25 @@ interface DataSyncResult {
 // ============================================================================
 
 export class DataSyncService {
-  private db: Kysely<Database>;
-
-  constructor(db: Kysely<Database>) {
-    this.db = db;
-  }
+  constructor(private readonly db: Kysely<Database>) {}
 
   /**
    * Sync statistical data for a matrix
    */
   async syncData(options: DataSyncOptions): Promise<DataSyncResult> {
-    const { matrixCode, yearFrom, yearTo, onProgress } = options;
+    const {
+      matrixCode,
+      yearFrom,
+      yearTo,
+      expandTerritorial,
+      countyCode,
+      onProgress,
+    } = options;
 
-    apiLogger.info({ matrixCode, yearFrom, yearTo }, "Starting data sync");
+    apiLogger.info(
+      { matrixCode, yearFrom, yearTo, countyCode },
+      "Starting data sync"
+    );
 
     // 1. Get matrix info
     const matrix = await this.db
@@ -95,8 +167,25 @@ export class DataSyncService {
       throw new Error(`No dimensions found for matrix ${matrixCode}`);
     }
 
+    // 2b. Load county info if county-specific sync requested
+    let countyInfo: CountyInfo | null = null;
+    if (countyCode) {
+      countyInfo = await this.loadCountyInfo(matrix.id, countyCode);
+      if (!countyInfo) {
+        throw new Error(
+          `County ${countyCode} not found in matrix ${matrixCode} or matrix doesn't have locality dimension`
+        );
+      }
+    }
+
     // 3. Build query selections
-    const selections = this.buildSelections(dimensions, yearFrom, yearTo);
+    const selections = this.buildSelections(
+      dimensions,
+      yearFrom,
+      yearTo,
+      expandTerritorial,
+      countyInfo
+    );
     const encQuery = buildEncQuery(selections);
 
     apiLogger.debug(
@@ -150,6 +239,517 @@ export class DataSyncService {
     apiLogger.info({ matrixCode, ...result }, "Data sync completed");
 
     return result;
+  }
+
+  /**
+   * Sync ALL data for a matrix using chunking strategy
+   * This is the new full sync method that handles 30,000 cell limit
+   */
+  async syncMatrixFull(options: FullSyncOptions): Promise<FullSyncResult> {
+    const {
+      matrixCode,
+      yearFrom,
+      yearTo,
+      classificationMode,
+      countyCode,
+      resume = true,
+      force = false,
+      verbose = false,
+      onProgress,
+    } = options;
+
+    const startTime = Date.now();
+    const result: FullSyncResult = {
+      chunksCompleted: 0,
+      chunksSkipped: 0,
+      chunksFailed: 0,
+      rowsInserted: 0,
+      rowsUpdated: 0,
+      errors: [],
+      duration: 0,
+    };
+
+    apiLogger.info(
+      {
+        matrixCode,
+        yearFrom,
+        yearTo,
+        classificationMode,
+        countyCode,
+        resume,
+        force,
+      },
+      "Starting full matrix sync"
+    );
+
+    // 1. Load matrix info
+    const chunkGenerator = new ChunkGenerator(this.db);
+    const matrixInfo = await chunkGenerator.loadMatrixInfo(matrixCode);
+
+    if (!matrixInfo) {
+      throw new Error(`Matrix ${matrixCode} not found`);
+    }
+
+    // 2. Generate chunks
+    onProgress?.({
+      phase: "planning",
+      chunksCompleted: 0,
+      chunksTotal: 0,
+      rowsInserted: 0,
+      rowsUpdated: 0,
+    });
+
+    const chunkResult = chunkGenerator.generateChunks(matrixInfo, {
+      yearFrom,
+      yearTo,
+      classificationMode,
+      countyCode,
+    });
+
+    apiLogger.info(
+      {
+        matrixCode,
+        chunkCount: chunkResult.chunks.length,
+        estimatedDuration: chunkResult.estimatedDuration,
+        hasUatData: chunkResult.hasUatData,
+      },
+      "Generated sync chunks"
+    );
+
+    // 3. Get matrix details for API calls
+    const details = matrixInfo.metadata?.details as
+      | Record<string, number>
+      | undefined;
+    const matMaxDim = details?.matMaxDim ?? matrixInfo.dimensions.length;
+    const matRegJ = details?.matRegJ ?? 0;
+    const matUMSpec = details?.matUMSpec ?? 0;
+
+    // 4. Process each chunk
+    const totalChunks = chunkResult.chunks.length;
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunk = chunkResult.chunks[i]!;
+      const chunkName = getChunkDisplayName(chunk);
+
+      onProgress?.({
+        phase: "syncing",
+        chunksCompleted: result.chunksCompleted,
+        chunksTotal: totalChunks,
+        currentChunk: chunkName,
+        rowsInserted: result.rowsInserted,
+        rowsUpdated: result.rowsUpdated,
+      });
+
+      // Check if chunk already synced (via checkpoint)
+      if (resume && !force) {
+        const checkpoint = await this.getCheckpoint(
+          matrixInfo.id,
+          chunk.chunkHash
+        );
+        if (checkpoint) {
+          if (verbose) {
+            apiLogger.debug({ chunkName, checkpoint }, "Skipping synced chunk");
+          }
+          result.chunksSkipped++;
+          continue;
+        }
+      }
+
+      try {
+        // Build selections for this chunk
+        const selections = await chunkGenerator.buildChunkSelections(
+          matrixInfo,
+          chunk
+        );
+        const encQuery = buildEncQuery(selections);
+        const cellCount = chunkGenerator.estimateCellCount(selections);
+
+        if (verbose) {
+          apiLogger.debug(
+            { chunkName, encQuery: encQuery.substring(0, 100), cellCount },
+            "Querying chunk"
+          );
+        }
+
+        // Query INS API
+        const csvData = await queryMatrix({
+          encQuery,
+          language: "ro",
+          matCode: matrixCode,
+          matMaxDim,
+          matRegJ,
+          matUMSpec,
+        });
+
+        // Parse CSV
+        const rows = this.parseCsv(csvData);
+
+        if (verbose) {
+          apiLogger.debug(
+            { chunkName, rowCount: rows.length },
+            "Parsed CSV data"
+          );
+        }
+
+        // Insert data
+        if (rows.length > 0) {
+          const insertResult = await this.insertData(
+            matrixInfo.id,
+            matrixInfo.dimensions.map((d) => ({
+              dimIndex: d.dimIndex,
+              dimensionType: d.dimensionType,
+              nomItems: d.nomItems.map((n) => ({
+                nomItemId: n.nomItemId,
+                dimensionType: d.dimensionType,
+                territoryId: n.territoryId,
+                timePeriodId: n.timePeriodId,
+                classificationValueId: n.classificationValueId,
+                unitId: n.unitId,
+                labelRo: n.labelRo,
+              })),
+            })),
+            rows,
+            encQuery
+          );
+
+          result.rowsInserted += insertResult.rowsInserted;
+          result.rowsUpdated += insertResult.rowsUpdated;
+          result.errors.push(...insertResult.errors);
+        }
+
+        // Record checkpoint
+        await this.recordCheckpoint(
+          matrixInfo.id,
+          chunk,
+          rows.length,
+          cellCount
+        );
+
+        result.chunksCompleted++;
+
+        apiLogger.info(
+          {
+            chunkName,
+            progress: `${String(result.chunksCompleted)}/${String(totalChunks)}`,
+            rowsInChunk: rows.length,
+          },
+          "Chunk sync complete"
+        );
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        apiLogger.error({ chunkName, error: errorMsg }, "Chunk sync failed");
+        result.chunksFailed++;
+        result.errors.push(`Chunk ${chunkName}: ${errorMsg}`);
+
+        // Record failed checkpoint
+        await this.recordFailedCheckpoint(matrixInfo.id, chunk, errorMsg);
+      }
+    }
+
+    // 5. Update coverage
+    onProgress?.({
+      phase: "updating_coverage",
+      chunksCompleted: result.chunksCompleted,
+      chunksTotal: totalChunks,
+      rowsInserted: result.rowsInserted,
+      rowsUpdated: result.rowsUpdated,
+    });
+
+    await this.updateCoverage(matrixInfo.id);
+
+    result.duration = Date.now() - startTime;
+
+    apiLogger.info(
+      {
+        matrixCode,
+        ...result,
+        durationSec: Math.round(result.duration / 1000),
+      },
+      "Full matrix sync completed"
+    );
+
+    return result;
+  }
+
+  /**
+   * Get checkpoint for a chunk
+   */
+  private async getCheckpoint(
+    matrixId: number,
+    chunkHash: string
+  ): Promise<{ rowCount: number; lastSyncedAt: Date } | null> {
+    const checkpoint = await this.db
+      .selectFrom("sync_checkpoints")
+      .select(["row_count", "last_synced_at"])
+      .where("matrix_id", "=", matrixId)
+      .where("chunk_hash", "=", chunkHash)
+      .where("error_message", "is", null)
+      .executeTakeFirst();
+
+    if (!checkpoint) return null;
+
+    return {
+      rowCount: checkpoint.row_count,
+      lastSyncedAt: checkpoint.last_synced_at,
+    };
+  }
+
+  /**
+   * Record successful checkpoint
+   */
+  private async recordCheckpoint(
+    matrixId: number,
+    chunk: SyncChunk,
+    rowCount: number,
+    cellsQueried: number
+  ): Promise<void> {
+    await this.db
+      .insertInto("sync_checkpoints")
+      .values({
+        matrix_id: matrixId,
+        chunk_hash: chunk.chunkHash,
+        chunk_query: `${chunk.countyCode ?? "NAT"}:${String(chunk.year)}:${chunk.classificationMode}`,
+        county_code: chunk.countyCode,
+        year: chunk.year,
+        classification_mode: chunk.classificationMode,
+        cells_queried: cellsQueried,
+        cells_returned: rowCount,
+        row_count: rowCount,
+        last_synced_at: new Date(),
+        error_message: null,
+        retry_count: 0,
+      })
+      .onConflict((oc) =>
+        oc.columns(["matrix_id", "chunk_hash"]).doUpdateSet({
+          row_count: rowCount,
+          cells_queried: cellsQueried,
+          cells_returned: rowCount,
+          last_synced_at: new Date(),
+          error_message: null,
+        })
+      )
+      .execute();
+  }
+
+  /**
+   * Record failed checkpoint
+   */
+  private async recordFailedCheckpoint(
+    matrixId: number,
+    chunk: SyncChunk,
+    errorMessage: string
+  ): Promise<void> {
+    await this.db
+      .insertInto("sync_checkpoints")
+      .values({
+        matrix_id: matrixId,
+        chunk_hash: chunk.chunkHash,
+        chunk_query: `${chunk.countyCode ?? "NAT"}:${String(chunk.year)}:${chunk.classificationMode}`,
+        county_code: chunk.countyCode,
+        year: chunk.year,
+        classification_mode: chunk.classificationMode,
+        cells_queried: null,
+        cells_returned: null,
+        row_count: 0,
+        last_synced_at: new Date(),
+        error_message: errorMessage.substring(0, 1000),
+        retry_count: 1,
+      })
+      .onConflict((oc) =>
+        oc.columns(["matrix_id", "chunk_hash"]).doUpdateSet({
+          error_message: errorMessage.substring(0, 1000),
+          last_synced_at: new Date(),
+          retry_count: sql`retry_count + 1`,
+        })
+      )
+      .execute();
+  }
+
+  /**
+   * Update coverage metrics for a matrix
+   */
+  private async updateCoverage(matrixId: number): Promise<void> {
+    // Count synced statistics
+    const stats = await this.db
+      .selectFrom("statistics")
+      .select([
+        this.db.fn.count<number>("id").as("total_rows"),
+        this.db.fn
+          .countAll<number>()
+          .filterWhere("value", "is", null)
+          .as("null_count"),
+        this.db.fn
+          .countAll<number>()
+          .filterWhere("value_status", "=", "missing")
+          .as("missing_count"),
+      ])
+      .where("matrix_id", "=", matrixId)
+      .executeTakeFirst();
+
+    // Count unique territories
+    const territories = await this.db
+      .selectFrom("statistics")
+      .select(this.db.fn.count<number>("territory_id").distinct().as("count"))
+      .where("matrix_id", "=", matrixId)
+      .where("territory_id", "is not", null)
+      .executeTakeFirst();
+
+    // Count unique years
+    const years = await this.db
+      .selectFrom("statistics")
+      .innerJoin("time_periods", "statistics.time_period_id", "time_periods.id")
+      .select(
+        this.db.fn.count<number>("time_periods.year").distinct().as("count")
+      )
+      .where("statistics.matrix_id", "=", matrixId)
+      .executeTakeFirst();
+
+    // Get total territories from nom_items
+    const totalTerritories = await this.db
+      .selectFrom("matrix_nom_items")
+      .select(this.db.fn.count<number>("id").as("count"))
+      .where("matrix_id", "=", matrixId)
+      .where("dimension_type", "=", "TERRITORIAL")
+      .executeTakeFirst();
+
+    // Get total years from nom_items
+    const totalYears = await this.db
+      .selectFrom("matrix_nom_items")
+      .select(this.db.fn.count<number>("id").as("count"))
+      .where("matrix_id", "=", matrixId)
+      .where("dimension_type", "=", "TEMPORAL")
+      .executeTakeFirst();
+
+    // Upsert coverage
+    await this.db
+      .insertInto("sync_coverage")
+      .values({
+        matrix_id: matrixId,
+        total_territories: totalTerritories?.count ?? 0,
+        synced_territories: territories?.count ?? 0,
+        total_years: totalYears?.count ?? 0,
+        synced_years: years?.count ?? 0,
+        total_classifications: 0, // TODO: calculate
+        synced_classifications: 0,
+        actual_data_points: stats?.total_rows ?? 0,
+        expected_data_points: null,
+        null_value_count: stats?.null_count ?? 0,
+        missing_value_count: stats?.missing_count ?? 0,
+        first_sync_at: new Date(),
+        last_sync_at: new Date(),
+      })
+      .onConflict((oc) =>
+        oc.column("matrix_id").doUpdateSet({
+          synced_territories: territories?.count ?? 0,
+          synced_years: years?.count ?? 0,
+          actual_data_points: stats?.total_rows ?? 0,
+          null_value_count: stats?.null_count ?? 0,
+          missing_value_count: stats?.missing_count ?? 0,
+          last_sync_at: new Date(),
+          last_coverage_update: new Date(),
+        })
+      )
+      .execute();
+
+    apiLogger.info(
+      {
+        matrixId,
+        syncedTerritories: territories?.count ?? 0,
+        syncedYears: years?.count ?? 0,
+        totalRows: stats?.total_rows ?? 0,
+      },
+      "Updated coverage metrics"
+    );
+  }
+
+  /**
+   * Load county info for county-specific sync
+   * Returns null if matrix doesn't have county+locality dimensions
+   */
+  private async loadCountyInfo(
+    matrixId: number,
+    countyCode: string
+  ): Promise<CountyInfo | null> {
+    // Find county dimension (NUTS3 level) and locality dimension (LAU level)
+    const countyNomItem = await this.db
+      .selectFrom("matrix_nom_items")
+      .innerJoin(
+        "territories",
+        "matrix_nom_items.territory_id",
+        "territories.id"
+      )
+      .select([
+        "matrix_nom_items.dim_index",
+        "matrix_nom_items.nom_item_id",
+        "territories.code",
+        "territories.path",
+      ])
+      .where("matrix_nom_items.matrix_id", "=", matrixId)
+      .where("matrix_nom_items.dimension_type", "=", "TERRITORIAL")
+      .where("territories.level", "=", "NUTS3")
+      .where("territories.code", "=", countyCode)
+      .executeTakeFirst();
+
+    if (!countyNomItem) {
+      apiLogger.warn(
+        { matrixId, countyCode },
+        "County not found in matrix dimensions"
+      );
+      return null;
+    }
+
+    // Find locality dimension (the one with LAU level items)
+    const localityDim = await this.db
+      .selectFrom("matrix_nom_items")
+      .innerJoin(
+        "territories",
+        "matrix_nom_items.territory_id",
+        "territories.id"
+      )
+      .select(["matrix_nom_items.dim_index"])
+      .where("matrix_nom_items.matrix_id", "=", matrixId)
+      .where("matrix_nom_items.dimension_type", "=", "TERRITORIAL")
+      .where("territories.level", "=", "LAU")
+      .executeTakeFirst();
+
+    if (!localityDim) {
+      apiLogger.warn({ matrixId }, "No locality dimension found");
+      return null;
+    }
+
+    // Get all localities that belong to this county (path starts with county path)
+    const countyPath = countyNomItem.path as unknown as string;
+    const localities = await this.db
+      .selectFrom("matrix_nom_items")
+      .innerJoin(
+        "territories",
+        "matrix_nom_items.territory_id",
+        "territories.id"
+      )
+      .select(["matrix_nom_items.nom_item_id"])
+      .where("matrix_nom_items.matrix_id", "=", matrixId)
+      .where("matrix_nom_items.dim_index", "=", localityDim.dim_index)
+      .where("territories.level", "=", "LAU")
+      .$call((qb) => qb.where("territories.path", "~", `${countyPath}.*`))
+      .execute();
+
+    apiLogger.info(
+      {
+        countyCode,
+        countyDimIndex: countyNomItem.dim_index,
+        localityDimIndex: localityDim.dim_index,
+        localityCount: localities.length,
+      },
+      "Loaded county info for sync"
+    );
+
+    return {
+      countyDimIndex: countyNomItem.dim_index,
+      localityDimIndex: localityDim.dim_index,
+      countyNomItemId: countyNomItem.nom_item_id,
+      countyTerritoryPath: countyPath,
+      localityNomItemIds: localities.map((l) => l.nom_item_id),
+    };
   }
 
   /**
@@ -220,9 +820,11 @@ export class DataSyncService {
   private buildSelections(
     dimensions: DimensionInfo[],
     yearFrom?: number,
-    yearTo?: number
+    yearTo?: number,
+    expandTerritorial?: boolean,
+    countyInfo?: CountyInfo | null
   ): number[][] {
-    return dimensions.map((dim) => {
+    return dimensions.map((dim, idx) => {
       // For temporal dimensions, filter by year range
       if (dim.dimensionType === "TEMPORAL" && (yearFrom || yearTo)) {
         const filtered = dim.nomItems.filter((item) => {
@@ -255,8 +857,47 @@ export class DataSyncService {
         ) {
           return [firstItem.nomItemId];
         }
-        // For territorial, take first (usually national level)
+        // For territorial dimensions with county-specific sync
+        if (dim.dimensionType === "TERRITORIAL" && countyInfo) {
+          // County dimension: select only the specified county
+          if (dim.dimIndex === countyInfo.countyDimIndex) {
+            apiLogger.info(
+              {
+                dimIndex: idx,
+                countyNomItemId: countyInfo.countyNomItemId,
+              },
+              "Selecting specific county"
+            );
+            return [countyInfo.countyNomItemId];
+          }
+          // Locality dimension: select only localities in this county
+          if (dim.dimIndex === countyInfo.localityDimIndex) {
+            apiLogger.info(
+              {
+                dimIndex: idx,
+                localityCount: countyInfo.localityNomItemIds.length,
+              },
+              "Selecting county localities"
+            );
+            return countyInfo.localityNomItemIds;
+          }
+        }
+        // For territorial, expand all items when expandTerritorial is set
+        // Note: For matrices with county+locality dimensions, API requires matching pairs
+        // This expands all items - for county+locality matrices, sync must iterate by county
         if (dim.dimensionType === "TERRITORIAL") {
+          if (expandTerritorial) {
+            // Return all territorial items EXCLUDING the TOTAL (first item)
+            const items = dim.nomItems.slice(1).map((item) => item.nomItemId);
+            apiLogger.info(
+              {
+                dimIndex: idx,
+                territorialCount: items.length,
+              },
+              "Expanding territorial dimension"
+            );
+            return items;
+          }
           return [dim.nomItems[0]!.nomItemId];
         }
         // For units, take first

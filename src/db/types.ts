@@ -330,7 +330,7 @@ export interface StatisticClassificationsTable {
 }
 
 /**
- * sync_checkpoints - Track sync progress per chunk
+ * sync_checkpoints - Track sync progress per chunk (enhanced for county-year chunking)
  */
 export interface SyncCheckpointsTable {
   id: Generated<number>;
@@ -339,6 +339,54 @@ export interface SyncCheckpointsTable {
   chunk_query: string;
   last_synced_at: Date;
   row_count: number;
+  // Enhanced fields for county-year chunking
+  county_code: string | null;
+  year: number | null;
+  classification_mode: string | null; // 'all', 'totals-only', or slice range
+  cells_queried: number | null;
+  cells_returned: number | null;
+  error_message: string | null;
+  retry_count: Generated<number>;
+}
+
+/**
+ * sync_coverage - Track sync completeness at matrix level
+ */
+export interface SyncCoverageTable {
+  id: Generated<number>;
+  matrix_id: number;
+  // Territory coverage
+  total_territories: number;
+  synced_territories: number;
+  // Year coverage
+  total_years: number;
+  synced_years: number;
+  // Classification coverage
+  total_classifications: number;
+  synced_classifications: number;
+  // Data point counts
+  expected_data_points: number | null;
+  actual_data_points: number;
+  null_value_count: number;
+  missing_value_count: number;
+  // Timestamps
+  first_sync_at: Date | null;
+  last_sync_at: Date | null;
+  last_coverage_update: Generated<Date>;
+}
+
+/**
+ * sync_dimension_coverage - Track per-dimension completeness
+ */
+export interface SyncDimensionCoverageTable {
+  id: Generated<number>;
+  matrix_id: number;
+  dim_index: number;
+  dimension_type: DimensionType;
+  total_values: number;
+  synced_values: number;
+  missing_value_ids: number[];
+  last_updated: Generated<Date>;
 }
 
 /**
@@ -365,6 +413,10 @@ export interface SyncJobFlags {
   totalsOnly?: boolean;
   /** Include all classification breakdowns (default: false) */
   includeAllClassifications?: boolean;
+  /** Sync ALL dimensions including all territories and classifications */
+  fullSync?: boolean;
+  /** Resume from last checkpoint */
+  resume?: boolean;
 }
 
 /**
@@ -543,6 +595,8 @@ export interface Database {
   statistic_classifications: StatisticClassificationsTable;
   sync_checkpoints: SyncCheckpointsTable;
   sync_jobs: SyncJobsTable;
+  sync_coverage: SyncCoverageTable;
+  sync_dimension_coverage: SyncDimensionCoverageTable;
 
   // Discovery & Analytics
   matrix_tags: MatrixTagsTable;
@@ -628,6 +682,17 @@ export type NewStatisticClassification =
 export type SyncCheckpoint = Selectable<SyncCheckpointsTable>;
 export type NewSyncCheckpoint = Insertable<SyncCheckpointsTable>;
 export type SyncCheckpointUpdate = Updateable<SyncCheckpointsTable>;
+
+// Sync Coverage
+export type SyncCoverage = Selectable<SyncCoverageTable>;
+export type NewSyncCoverage = Insertable<SyncCoverageTable>;
+export type SyncCoverageUpdate = Updateable<SyncCoverageTable>;
+
+// Sync Dimension Coverage
+export type SyncDimensionCoverage = Selectable<SyncDimensionCoverageTable>;
+export type NewSyncDimensionCoverage = Insertable<SyncDimensionCoverageTable>;
+export type SyncDimensionCoverageUpdate =
+  Updateable<SyncDimensionCoverageTable>;
 
 // Sync Jobs
 export type SyncJob = Selectable<SyncJobsTable>;

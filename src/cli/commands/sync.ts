@@ -363,97 +363,197 @@ No manual partition creation is needed for most use cases.
     .command("data <matrix>")
     .description("Sync statistical data for a matrix (requires partition)")
     .option("--years <range>", "Year range, e.g., 2020-2024")
-    .action(async (matrixCode: string, options: { years?: string }) => {
-      try {
-        // Check if matrix exists and is synced
-        const matrix = await db
-          .selectFrom("matrices")
-          .select(["id", "sync_status"])
-          .where("ins_code", "=", matrixCode)
-          .executeTakeFirst();
-
-        if (!matrix) {
-          console.error(
-            `Matrix ${matrixCode} not found. Run 'pnpm cli sync matrices' first.`
-          );
-          process.exitCode = 1;
-          return;
+    .option(
+      "--full",
+      "Sync ALL dimensions (all territories, all classifications) using chunking"
+    )
+    .option(
+      "--totals-only",
+      "Only sync TOTAL/aggregate values (default for legacy mode)"
+    )
+    .option(
+      "--resume",
+      "Resume from last checkpoint (default: true for --full)"
+    )
+    .option("--force", "Force re-sync even if checkpoints exist")
+    .option("--verbose", "Enable detailed debug logging")
+    .option(
+      "--expand-territorial",
+      "Expand territorial dimension to all localities (UATs) instead of just national total"
+    )
+    .option(
+      "--county <code>",
+      "County code (e.g., AB for Alba) to sync only that county's localities"
+    )
+    .action(
+      async (
+        matrixCode: string,
+        options: {
+          years?: string;
+          full?: boolean;
+          totalsOnly?: boolean;
+          resume?: boolean;
+          force?: boolean;
+          verbose?: boolean;
+          expandTerritorial?: boolean;
+          county?: string;
         }
+      ) => {
+        try {
+          // Check if matrix exists and is synced
+          const matrix = await db
+            .selectFrom("matrices")
+            .select(["id", "sync_status"])
+            .where("ins_code", "=", matrixCode)
+            .executeTakeFirst();
 
-        if (matrix.sync_status !== "SYNCED") {
-          console.error(
-            `Matrix ${matrixCode} metadata not synced (status: ${matrix.sync_status ?? "PENDING"}).`
-          );
-          console.log(
-            "Run 'pnpm cli sync matrices --code " + matrixCode + "' first."
-          );
-          process.exitCode = 1;
-          return;
-        }
+          if (!matrix) {
+            console.error(
+              `Matrix ${matrixCode} not found. Run 'pnpm cli sync matrices' first.`
+            );
+            process.exitCode = 1;
+            return;
+          }
 
-        // Check if partition exists
-        const partitionName = `statistics_matrix_${String(matrix.id)}`;
-        const partitionCheck = await sql<{ exists: boolean }>`
+          if (matrix.sync_status !== "SYNCED") {
+            console.error(
+              `Matrix ${matrixCode} metadata not synced (status: ${matrix.sync_status ?? "PENDING"}).`
+            );
+            console.log(
+              "Run 'pnpm cli sync matrices --code " + matrixCode + "' first."
+            );
+            process.exitCode = 1;
+            return;
+          }
+
+          // Check if partition exists
+          const partitionName = `statistics_matrix_${String(matrix.id)}`;
+          const partitionCheck = await sql<{ exists: boolean }>`
           SELECT EXISTS (
             SELECT 1 FROM pg_tables
             WHERE schemaname = 'public' AND tablename = ${partitionName}
           ) as exists
         `.execute(db);
-        const partitionExists = partitionCheck.rows[0]?.exists ?? false;
+          const partitionExists = partitionCheck.rows[0]?.exists ?? false;
 
-        if (!partitionExists) {
-          console.error(
-            `No partition exists for matrix ${matrixCode} (id: ${String(matrix.id)}).`
-          );
-          console.log("\nCreate a partition first:");
-          console.log(`  pnpm cli sync partitions --code ${matrixCode}`);
+          if (!partitionExists) {
+            console.error(
+              `No partition exists for matrix ${matrixCode} (id: ${String(matrix.id)}).`
+            );
+            console.log("\nCreate a partition first:");
+            console.log(`  pnpm cli sync partitions --code ${matrixCode}`);
+            process.exitCode = 1;
+            return;
+          }
+
+          // Parse year range
+          const currentYear = new Date().getFullYear();
+          let yearFrom = 2020;
+          let yearTo = currentYear;
+          if (options.years) {
+            const [from, to] = options.years
+              .split("-")
+              .map((s) => Number.parseInt(s, 10));
+            yearFrom = from ?? 2020;
+            yearTo = to ?? from ?? currentYear;
+          }
+
+          const dataService = new DataSyncService(db);
+
+          // Use full sync mode if --full is specified
+          if (options.full === true) {
+            const spinner = ora(
+              `Syncing ALL data for ${matrixCode}...`
+            ).start();
+
+            const result = await dataService.syncMatrixFull({
+              matrixCode,
+              yearFrom,
+              yearTo,
+              classificationMode:
+                options.totalsOnly === true ? "totals-only" : "all",
+              countyCode: options.county,
+              resume: options.resume !== false,
+              force: options.force === true,
+              verbose: options.verbose === true,
+              onProgress: (progress) => {
+                if (progress.phase === "planning") {
+                  spinner.text = "Generating sync chunks...";
+                } else if (progress.phase === "syncing") {
+                  spinner.text = `Syncing: ${progress.currentChunk ?? ""} [${String(progress.chunksCompleted)}/${String(progress.chunksTotal)}] - ${String(progress.rowsInserted)} rows`;
+                } else {
+                  spinner.text = "Updating coverage metrics...";
+                }
+              },
+            });
+
+            const durationSec = Math.round(result.duration / 1000);
+            spinner.succeed(
+              `Full sync complete: ${String(result.chunksCompleted)} chunks, ` +
+                `${String(result.rowsInserted)} inserted, ${String(result.rowsUpdated)} updated ` +
+                `(${String(durationSec)}s)`
+            );
+
+            if (result.chunksSkipped > 0) {
+              console.log(
+                `  Skipped: ${String(result.chunksSkipped)} chunks (already synced)`
+              );
+            }
+
+            if (result.chunksFailed > 0) {
+              console.log(`  Failed: ${String(result.chunksFailed)} chunks`);
+            }
+
+            if (result.errors.length > 0) {
+              console.log(`\nWarnings (${String(result.errors.length)}):`);
+              for (const err of result.errors.slice(0, 10)) {
+                console.log(`  - ${err}`);
+              }
+              if (result.errors.length > 10) {
+                console.log(
+                  `  ... and ${String(result.errors.length - 10)} more`
+                );
+              }
+            }
+          } else {
+            // Legacy mode
+            const spinner = ora(`Syncing data for ${matrixCode}...`).start();
+
+            const result = await dataService.syncData({
+              matrixCode,
+              yearFrom: options.years ? yearFrom : undefined,
+              yearTo: options.years ? yearTo : undefined,
+              expandTerritorial: options.expandTerritorial,
+              countyCode: options.county,
+              onProgress: (progress) => {
+                spinner.text = `${progress.phase}: ${String(progress.current)}/${String(progress.total)}`;
+              },
+            });
+
+            spinner.succeed(
+              `Data sync complete: ${String(result.rowsInserted)} inserted, ${String(result.rowsUpdated)} updated`
+            );
+
+            if (result.errors.length > 0) {
+              console.log(`\nWarnings (${String(result.errors.length)}):`);
+              for (const err of result.errors.slice(0, 10)) {
+                console.log(`  - ${err}`);
+              }
+              if (result.errors.length > 10) {
+                console.log(
+                  `  ... and ${String(result.errors.length - 10)} more`
+                );
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`Error: ${(error as Error).message}`);
           process.exitCode = 1;
-          return;
+        } finally {
+          await closeConnection();
         }
-
-        // Parse year range
-        let yearFrom: number | undefined;
-        let yearTo: number | undefined;
-        if (options.years) {
-          const [from, to] = options.years
-            .split("-")
-            .map((s) => parseInt(s, 10));
-          yearFrom = from;
-          yearTo = to ?? from;
-        }
-
-        const spinner = ora(`Syncing data for ${matrixCode}...`).start();
-
-        const dataService = new DataSyncService(db);
-        const result = await dataService.syncData({
-          matrixCode,
-          yearFrom,
-          yearTo,
-          onProgress: (progress) => {
-            spinner.text = `${progress.phase}: ${String(progress.current)}/${String(progress.total)}`;
-          },
-        });
-
-        spinner.succeed(
-          `Data sync complete: ${String(result.rowsInserted)} inserted, ${String(result.rowsUpdated)} updated`
-        );
-
-        if (result.errors.length > 0) {
-          console.log(`\nWarnings (${String(result.errors.length)}):`);
-          for (const err of result.errors.slice(0, 10)) {
-            console.log(`  - ${err}`);
-          }
-          if (result.errors.length > 10) {
-            console.log(`  ... and ${String(result.errors.length - 10)} more`);
-          }
-        }
-      } catch (error) {
-        console.error(`Error: ${(error as Error).message}`);
-        process.exitCode = 1;
-      } finally {
-        await closeConnection();
       }
-    });
+    );
 
   // sync data-all - bulk sync statistical data for all matrices with metadata
   sync
@@ -1405,4 +1505,302 @@ TROUBLESHOOTING
         await closeConnection();
       }
     });
+
+  // sync coverage [matrix] - show sync coverage statistics
+  sync
+    .command("coverage [matrix]")
+    .description("Show sync coverage statistics for a matrix or all matrices")
+    .option("--incomplete", "Show only matrices with <100% coverage")
+    .action(
+      async (
+        matrixCode: string | undefined,
+        options: { incomplete?: boolean }
+      ) => {
+        try {
+          if (matrixCode) {
+            // Show coverage for specific matrix
+            const coverage = await db
+              .selectFrom("sync_coverage")
+              .innerJoin("matrices", "sync_coverage.matrix_id", "matrices.id")
+              .select([
+                "matrices.ins_code",
+                "matrices.metadata",
+                "sync_coverage.total_territories",
+                "sync_coverage.synced_territories",
+                "sync_coverage.total_years",
+                "sync_coverage.synced_years",
+                "sync_coverage.total_classifications",
+                "sync_coverage.synced_classifications",
+                "sync_coverage.actual_data_points",
+                "sync_coverage.expected_data_points",
+                "sync_coverage.null_value_count",
+                "sync_coverage.missing_value_count",
+                "sync_coverage.first_sync_at",
+                "sync_coverage.last_sync_at",
+              ])
+              .where("matrices.ins_code", "=", matrixCode)
+              .executeTakeFirst();
+
+            if (!coverage) {
+              console.log(
+                `No coverage data for ${matrixCode}. Run sync first.`
+              );
+              return;
+            }
+
+            const matrixName =
+              (coverage.metadata as { names?: { ro?: string } })?.names?.ro ??
+              matrixCode;
+            const territoryPct =
+              coverage.total_territories > 0
+                ? (
+                    (coverage.synced_territories / coverage.total_territories) *
+                    100
+                  ).toFixed(1)
+                : "100.0";
+            const yearPct =
+              coverage.total_years > 0
+                ? (
+                    (coverage.synced_years / coverage.total_years) *
+                    100
+                  ).toFixed(1)
+                : "100.0";
+            const overallPct =
+              coverage.expected_data_points && coverage.expected_data_points > 0
+                ? (
+                    ((coverage.actual_data_points ?? 0) /
+                      coverage.expected_data_points) *
+                    100
+                  ).toFixed(1)
+                : "N/A";
+
+            console.log("\n" + "═".repeat(80));
+            console.log(`SYNC COVERAGE: ${matrixCode}`);
+            console.log("═".repeat(80));
+            console.log(`  Matrix:     ${matrixName}`);
+            console.log(
+              `  Last Sync:  ${coverage.last_sync_at?.toISOString() ?? "Never"}`
+            );
+            console.log("─".repeat(80));
+            console.log("  COVERAGE SUMMARY");
+            console.log("─".repeat(80));
+            console.log(
+              `  Territories:    ${String(coverage.synced_territories).padStart(6)} / ${String(coverage.total_territories).padStart(6)} (${territoryPct}%)`
+            );
+            console.log(
+              `  Years:          ${String(coverage.synced_years).padStart(6)} / ${String(coverage.total_years).padStart(6)} (${yearPct}%)`
+            );
+            console.log("─".repeat(80));
+            console.log(
+              `  Data Points:    ${String(coverage.actual_data_points ?? 0).padStart(10)} (${overallPct}% of expected)`
+            );
+            console.log(
+              `    - Null values:    ${String(coverage.null_value_count ?? 0)}`
+            );
+            console.log(
+              `    - Missing (:):    ${String(coverage.missing_value_count ?? 0)}`
+            );
+            console.log("═".repeat(80));
+          } else {
+            // Show coverage summary for all matrices
+            let query = db
+              .selectFrom("sync_coverage")
+              .innerJoin("matrices", "sync_coverage.matrix_id", "matrices.id")
+              .select([
+                "matrices.ins_code",
+                "sync_coverage.total_territories",
+                "sync_coverage.synced_territories",
+                "sync_coverage.total_years",
+                "sync_coverage.synced_years",
+                "sync_coverage.actual_data_points",
+                "sync_coverage.last_sync_at",
+              ])
+              .orderBy("sync_coverage.last_sync_at", "desc");
+
+            if (options.incomplete === true) {
+              query = query.where(({ eb }) =>
+                eb.or([
+                  eb(
+                    "sync_coverage.synced_territories",
+                    "<",
+                    eb.ref("sync_coverage.total_territories")
+                  ),
+                  eb(
+                    "sync_coverage.synced_years",
+                    "<",
+                    eb.ref("sync_coverage.total_years")
+                  ),
+                ])
+              );
+            }
+
+            const coverages = await query.limit(50).execute();
+
+            if (coverages.length === 0) {
+              console.log("No coverage data found. Run sync first.");
+              return;
+            }
+
+            console.log("\n" + "═".repeat(100));
+            console.log("SYNC COVERAGE SUMMARY");
+            console.log("═".repeat(100));
+            console.log(
+              "  " +
+                "Matrix".padEnd(15) +
+                "Territories".padEnd(20) +
+                "Years".padEnd(15) +
+                "Data Points".padEnd(15) +
+                "Last Sync"
+            );
+            console.log("─".repeat(100));
+
+            for (const cov of coverages) {
+              const territoryStr = `${String(cov.synced_territories)}/${String(cov.total_territories)}`;
+              const yearStr = `${String(cov.synced_years)}/${String(cov.total_years)}`;
+              const lastSync = cov.last_sync_at
+                ? cov.last_sync_at.toISOString().substring(0, 10)
+                : "Never";
+
+              console.log(
+                "  " +
+                  cov.ins_code.padEnd(15) +
+                  territoryStr.padEnd(20) +
+                  yearStr.padEnd(15) +
+                  String(cov.actual_data_points ?? 0).padEnd(15) +
+                  lastSync
+              );
+            }
+
+            console.log("═".repeat(100));
+            console.log(`  Total: ${String(coverages.length)} matrices`);
+          }
+        } catch (error) {
+          console.error(`Error: ${(error as Error).message}`);
+          process.exitCode = 1;
+        } finally {
+          await closeConnection();
+        }
+      }
+    );
+
+  // sync plan <matrix> - show sync execution plan without executing
+  sync
+    .command("plan <matrix>")
+    .description("Show sync execution plan without executing")
+    .option("--years <range>", "Year range, e.g., 2020-2024")
+    .option("--county <code>", "County code (e.g., AB for Alba)")
+    .action(
+      async (
+        matrixCode: string,
+        options: { years?: string; county?: string }
+      ) => {
+        // Import dynamically to avoid circular deps
+        const { ChunkGenerator, getChunkDisplayName } =
+          await import("../../services/sync/chunking.js");
+
+        try {
+          const chunkGenerator = new ChunkGenerator(db);
+          const matrixInfo = await chunkGenerator.loadMatrixInfo(matrixCode);
+
+          if (!matrixInfo) {
+            console.error(`Matrix ${matrixCode} not found.`);
+            process.exitCode = 1;
+            return;
+          }
+
+          // Parse year range
+          const currentYear = new Date().getFullYear();
+          let yearFrom = 2020;
+          let yearTo = currentYear;
+          if (options.years) {
+            const [from, to] = options.years
+              .split("-")
+              .map((s) => Number.parseInt(s, 10));
+            yearFrom = from ?? 2020;
+            yearTo = to ?? from ?? currentYear;
+          }
+
+          const chunkResult = chunkGenerator.generateChunks(matrixInfo, {
+            yearFrom,
+            yearTo,
+            classificationMode: "all",
+            countyCode: options.county,
+          });
+
+          const matrixName = matrixInfo.metadata?.names?.ro ?? matrixCode;
+
+          console.log("\n" + "═".repeat(80));
+          console.log(
+            `SYNC PLAN: ${matrixCode} (${String(yearFrom)}-${String(yearTo)})`
+          );
+          console.log("═".repeat(80));
+          console.log(`  Matrix: ${matrixName}`);
+          console.log("");
+
+          if (chunkResult.hasUatData) {
+            console.log(
+              "  Matrix has UAT-level data. Will chunk by county and year."
+            );
+          } else if (chunkResult.hasCountyData) {
+            console.log("  Matrix has county-level data. Will chunk by year.");
+          } else {
+            console.log("  Matrix has national-level data only.");
+          }
+
+          console.log("");
+          console.log("  EXECUTION PLAN:");
+          console.log(
+            `    Total chunks:     ${String(chunkResult.chunks.length)}`
+          );
+          console.log(
+            `    Est. API calls:   ${String(chunkResult.estimatedApiCalls)}`
+          );
+          console.log(`    Est. duration:    ${chunkResult.estimatedDuration}`);
+
+          // Show sample chunks
+          console.log("");
+          console.log("  SAMPLE CHUNKS:");
+          const sampleChunks = chunkResult.chunks.slice(0, 5);
+          for (const chunk of sampleChunks) {
+            console.log(`    - ${getChunkDisplayName(chunk)}`);
+          }
+          if (chunkResult.chunks.length > 5) {
+            console.log(
+              `    ... and ${String(chunkResult.chunks.length - 5)} more`
+            );
+          }
+
+          // Check existing checkpoints
+          const existingCheckpoints = await db
+            .selectFrom("sync_checkpoints")
+            .select([sql<number>`COUNT(*)::int`.as("count")])
+            .where("matrix_id", "=", matrixInfo.id)
+            .where("error_message", "is", null)
+            .executeTakeFirst();
+
+          const checkpointCount = existingCheckpoints?.count ?? 0;
+
+          console.log("");
+          console.log(
+            `  Already synced:     ${String(checkpointCount)} chunks`
+          );
+          console.log(
+            `  Remaining:          ${String(chunkResult.chunks.length - checkpointCount)} chunks`
+          );
+
+          console.log("");
+          console.log("═".repeat(80));
+          console.log("  Run with --full to start sync:");
+          console.log(
+            `    pnpm cli sync data ${matrixCode} --years ${String(yearFrom)}-${String(yearTo)} --full`
+          );
+          console.log("═".repeat(80));
+        } catch (error) {
+          console.error(`Error: ${(error as Error).message}`);
+          process.exitCode = 1;
+        } finally {
+          await closeConnection();
+        }
+      }
+    );
 }

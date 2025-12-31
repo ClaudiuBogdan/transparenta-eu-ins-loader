@@ -811,7 +811,26 @@ export class SyncOrchestrator {
       return "UNIT_OF_MEASURE";
     }
 
-    // 3. Check dimension label for known classification patterns (before checking options!)
+    // 3. Check dimension label for known TERRITORIAL patterns
+    // CRITICAL: Only these specific dimension labels indicate territorial dimensions.
+    // This prevents misclassifying HS commodity codes (0101, 1001), salary ranges,
+    // and other digit-prefixed data as territories.
+    const knownTerritorialLabels = [
+      "JUDETE",
+      "LOCALITATI",
+      "MUNICIPII SI ORASE",
+      "REGIUNI",
+      "MACROREGIUNI",
+      "REGIUNI DE DEZVOLTARE",
+      "ZONE TERITORIALE",
+    ];
+    for (const pattern of knownTerritorialLabels) {
+      if (labelNormalized === pattern || labelNormalized.includes(pattern)) {
+        return "TERRITORIAL";
+      }
+    }
+
+    // 4. Check dimension label for known classification patterns
     const knownClassificationLabels = [
       "SEXE",
       "SEX",
@@ -837,6 +856,9 @@ export class SyncOrchestrator {
       "CAEN",
       "PRODUSE",
       "TIPURI",
+      "GRUPE",
+      "CATEGORII",
+      "NOMENCLATOR",
     ];
     for (const pattern of knownClassificationLabels) {
       if (labelNormalized.includes(pattern)) {
@@ -844,68 +866,24 @@ export class SyncOrchestrator {
       }
     }
 
-    // 4. Check options for patterns (use multiple options, not just first)
-    const options = dim.options.slice(0, 5); // Check first 5 options
-    let territorialScore = 0;
-    let temporalScore = 0;
-
+    // 5. Check options for temporal patterns only
+    // NOTE: We deliberately do NOT use digit-prefix patterns to detect territorial
+    // dimensions, as this incorrectly matches HS codes (0101, 1001) and salary ranges.
+    // Territorial dimensions are identified by their label (Judete, Localitati, etc.)
+    const options = dim.options.slice(0, 5);
     for (const opt of options) {
-      const optLabel = opt.label;
-      const optLabelLower = optLabel.toLowerCase();
-
-      // Territorial patterns
-      if (/^\d{4,6}\s+/.test(optLabel)) {
-        // SIRUTA code prefix
-        territorialScore += 3;
-      }
-      if (
-        optLabelLower.includes("macroregiune") ||
-        optLabelLower.includes("regiune")
-      ) {
-        territorialScore += 2;
-      }
-      if (
-        optLabelLower.includes("bucuresti") ||
-        optLabelLower.includes("bucurești")
-      ) {
-        territorialScore += 2;
-      }
-      if (optLabelLower.includes("judet") || optLabelLower.includes("județ")) {
-        territorialScore += 2;
-      }
+      const optLabelLower = opt.label.toLowerCase();
 
       // Temporal patterns
-      if (optLabelLower.includes("anul ") || optLabelLower.startsWith("anul")) {
-        temporalScore += 3;
+      if (
+        optLabelLower.includes("anul ") ||
+        optLabelLower.startsWith("anul") ||
+        optLabelLower.includes("trimestrul ") ||
+        optLabelLower.includes("luna ") ||
+        /^\d{4}$/.test(opt.label) // Just a year like "2023"
+      ) {
+        return "TEMPORAL";
       }
-      if (optLabelLower.includes("trimestrul ")) {
-        temporalScore += 3;
-      }
-      if (optLabelLower.includes("luna ")) {
-        temporalScore += 3;
-      }
-      if (/^\d{4}$/.test(optLabel)) {
-        // Just a year like "2023"
-        temporalScore += 2;
-      }
-    }
-
-    // First option being "Total" is NOT enough to classify as territorial
-    // Many classification dimensions also have "Total" as first option
-    const firstOption = dim.options[0];
-    if (
-      firstOption?.label.toLowerCase() === "total" &&
-      territorialScore === 0
-    ) {
-      // Only add score if we have other territorial indicators
-      // Don't classify as territorial just because first option is "Total"
-    }
-
-    if (temporalScore > territorialScore && temporalScore >= 2) {
-      return "TEMPORAL";
-    }
-    if (territorialScore > temporalScore && territorialScore >= 2) {
-      return "TERRITORIAL";
     }
 
     // Default to classification

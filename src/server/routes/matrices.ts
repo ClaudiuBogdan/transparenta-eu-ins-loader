@@ -441,6 +441,228 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
   });
 
   /**
+   * GET /api/v1/matrices/:code/dimensions
+   * Get all dimensions with their options
+   */
+  app.get<{
+    Params: Static<typeof CodeParamSchema>;
+    Querystring: Static<typeof DimensionOptionsQuerySchema>;
+  }>(
+    "/matrices/:code/dimensions",
+    {
+      schema: {
+        summary: "Get all dimensions with options",
+        description:
+          "Get all dimensions for a matrix with their complete option lists. " +
+          "Each dimension includes its nomItemId values that can be used for querying. " +
+          "Example: `/matrices/FOM103E/dimensions` returns CAEN activities, professional status, years, and units.",
+        tags: ["Matrices"],
+        params: CodeParamSchema,
+        querystring: DimensionOptionsQuerySchema,
+      },
+    },
+    async (request) => {
+      const { code } = request.params;
+      const locale = request.query.locale ?? "ro";
+
+      // Get matrix
+      const matrix = await db
+        .selectFrom("matrices")
+        .select(["id", "ins_code", "metadata"])
+        .where("ins_code", "=", code)
+        .executeTakeFirst();
+
+      if (!matrix) {
+        throw new NotFoundError(`Matrix with code ${code} not found`);
+      }
+
+      // Get all dimensions
+      const dimensions = await db
+        .selectFrom("matrix_dimensions")
+        .leftJoin(
+          "classification_types",
+          "matrix_dimensions.classification_type_id",
+          "classification_types.id"
+        )
+        .select([
+          "matrix_dimensions.id",
+          "matrix_dimensions.dim_index",
+          "matrix_dimensions.labels",
+          "matrix_dimensions.dimension_type",
+          "matrix_dimensions.is_hierarchical",
+          "matrix_dimensions.option_count",
+          "classification_types.code as classification_type_code",
+        ])
+        .where("matrix_dimensions.matrix_id", "=", matrix.id)
+        .orderBy("matrix_dimensions.dim_index", "asc")
+        .execute();
+
+      // Get all nom_items for all dimensions in one query
+      const allOptions = await db
+        .selectFrom("matrix_nom_items")
+        .leftJoin(
+          "territories",
+          "matrix_nom_items.territory_id",
+          "territories.id"
+        )
+        .leftJoin(
+          "time_periods",
+          "matrix_nom_items.time_period_id",
+          "time_periods.id"
+        )
+        .leftJoin(
+          "classification_values",
+          "matrix_nom_items.classification_value_id",
+          "classification_values.id"
+        )
+        .leftJoin(
+          "units_of_measure",
+          "matrix_nom_items.unit_id",
+          "units_of_measure.id"
+        )
+        .select([
+          "matrix_nom_items.id",
+          "matrix_nom_items.dim_index",
+          "matrix_nom_items.nom_item_id",
+          "matrix_nom_items.labels",
+          "matrix_nom_items.offset_order",
+          "matrix_nom_items.parent_nom_item_id",
+          "territories.id as territory_id",
+          "territories.code as territory_code",
+          "territories.names as territory_names",
+          "territories.path as territory_path",
+          "time_periods.id as time_period_id",
+          "time_periods.year as time_period_year",
+          "time_periods.labels as time_period_labels",
+          "classification_values.id as class_value_id",
+          "classification_values.code as class_value_code",
+          "classification_values.names as class_value_names",
+          "classification_values.path as class_value_path",
+          "units_of_measure.id as unit_id",
+          "units_of_measure.code as unit_code",
+          "units_of_measure.names as unit_names",
+        ])
+        .where("matrix_nom_items.matrix_id", "=", matrix.id)
+        .orderBy("matrix_nom_items.dim_index", "asc")
+        .orderBy("matrix_nom_items.offset_order", "asc")
+        .execute();
+
+      // Group options by dimension index
+      const optionsByDim = new Map<number, typeof allOptions>();
+      for (const opt of allOptions) {
+        if (!optionsByDim.has(opt.dim_index)) {
+          optionsByDim.set(opt.dim_index, []);
+        }
+        optionsByDim.get(opt.dim_index)!.push(opt);
+      }
+
+      // Build response
+      const dimensionsWithOptions = dimensions.map((dim) => {
+        const dimOptions = optionsByDim.get(dim.dim_index) ?? [];
+
+        const options = dimOptions.map((opt) => {
+          let reference = null;
+
+          if (opt.territory_id) {
+            const names = opt.territory_names;
+            reference = {
+              type: "TERRITORY" as const,
+              id: opt.territory_id,
+              code: opt.territory_code ?? undefined,
+              name: names
+                ? locale === "en" && names.en
+                  ? names.en
+                  : names.ro
+                : undefined,
+              path: opt.territory_path ?? undefined,
+            };
+          } else if (opt.time_period_id) {
+            const labels = opt.time_period_labels;
+            reference = {
+              type: "TIME_PERIOD" as const,
+              id: opt.time_period_id,
+              year: opt.time_period_year ?? undefined,
+              name: labels
+                ? locale === "en" && labels.en
+                  ? labels.en
+                  : labels.ro
+                : undefined,
+            };
+          } else if (opt.class_value_id) {
+            const names = opt.class_value_names;
+            reference = {
+              type: "CLASSIFICATION" as const,
+              id: opt.class_value_id,
+              code: opt.class_value_code ?? undefined,
+              name: names
+                ? locale === "en" && names.en
+                  ? names.en
+                  : names.ro
+                : undefined,
+              path: opt.class_value_path ?? undefined,
+            };
+          } else if (opt.unit_id) {
+            const names = opt.unit_names;
+            reference = {
+              type: "UNIT" as const,
+              id: opt.unit_id,
+              code: opt.unit_code ?? undefined,
+              name: names
+                ? locale === "en" && names.en
+                  ? names.en
+                  : names.ro
+                : undefined,
+            };
+          }
+
+          const labels = opt.labels;
+          return {
+            id: opt.id,
+            nomItemId: opt.nom_item_id,
+            label: labels
+              ? locale === "en" && labels.en
+                ? labels.en
+                : labels.ro
+              : "",
+            offsetOrder: opt.offset_order,
+            parentNomItemId: opt.parent_nom_item_id,
+            reference,
+          };
+        });
+
+        const dimLabels = dim.labels;
+        return {
+          id: dim.id,
+          dimCode: dim.dim_index,
+          label: dimLabels
+            ? locale === "en" && dimLabels.en
+              ? dimLabels.en
+              : dimLabels.ro
+            : "",
+          dimensionType: dim.dimension_type,
+          classificationTypeCode: dim.classification_type_code ?? undefined,
+          isHierarchical: dim.is_hierarchical,
+          optionCount: dim.option_count,
+          options,
+        };
+      });
+
+      const metadata = matrix.metadata;
+      return {
+        data: {
+          matrixCode: code,
+          matrixName:
+            locale === "en" && metadata.names.en
+              ? metadata.names.en
+              : metadata.names.ro,
+          dimensionCount: dimensions.length,
+          dimensions: dimensionsWithOptions,
+        },
+      };
+    }
+  );
+
+  /**
    * GET /api/v1/matrices/:code/dimensions/:dimIndex
    * Get dimension options (nom items)
    */

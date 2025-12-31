@@ -427,8 +427,25 @@ export class TerritoryService {
     // SIRUTA pattern: "38731 Ripiceni"
     const sirutaMatch = SIRUTA_PATTERN.exec(trimmed);
     if (sirutaMatch?.[1] && sirutaMatch[2]) {
+      const sirutaCode = sirutaMatch[1];
+
+      // CRITICAL: Validate that the code falls within valid SIRUTA ranges.
+      // This prevents creating territories from non-territorial data like:
+      // - HS commodity codes (0101, 1001, etc.)
+      // - Salary ranges (330001, etc.)
+      // Valid SIRUTA codes are in range 1000-235999 and must map to a county.
+      const countyCode = this.getCountyCodeFromSiruta(sirutaCode);
+      if (!countyCode) {
+        // Not a valid SIRUTA code - return null to indicate unresolved
+        logger.debug(
+          { sirutaCode, label: trimmed },
+          "Rejecting invalid SIRUTA code - does not map to any county"
+        );
+        return null;
+      }
+
       const id = await this.findOrCreateLocality(
-        sirutaMatch[1],
+        sirutaCode,
         sirutaMatch[2],
         labelEn
       );

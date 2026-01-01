@@ -1551,11 +1551,17 @@ export class DataSyncService {
   ): Promise<{
     inserted: number;
     updated: number;
-    hashToId: Map<string, number>;
+    insertedHashToId: Map<string, number>;
   }> {
+    if (!Number.isInteger(matrixId) || matrixId <= 0) {
+      throw new Error(
+        `Invalid matrixId for partition table: ${String(matrixId)}`
+      );
+    }
+
     let totalInserted = 0;
     let totalUpdated = 0;
-    const hashToId = new Map<string, number>();
+    const insertedHashToId = new Map<string, number>();
 
     // Deduplicate by natural_key_hash (keep last occurrence for each hash)
     const deduplicatedMap = new Map<string, ParsedRow>();
@@ -1593,7 +1599,7 @@ export class DataSyncService {
         natural_key_hash: string;
         was_inserted: boolean;
       }>`
-        INSERT INTO ${sql.raw(partitionTable)} (matrix_id, territory_id, time_period_id, unit_id, value, value_status, natural_key_hash, source_enc_query)
+        INSERT INTO ${sql.raw(partitionTable)} AS target (matrix_id, territory_id, time_period_id, unit_id, value, value_status, natural_key_hash, source_enc_query)
         SELECT
           (v->>'matrix_id')::int,
           (v->>'territory_id')::int,
@@ -1608,14 +1614,16 @@ export class DataSyncService {
           value = EXCLUDED.value,
           value_status = EXCLUDED.value_status,
           updated_at = NOW()
+        WHERE target.value IS DISTINCT FROM EXCLUDED.value
+          OR target.value_status IS DISTINCT FROM EXCLUDED.value_status
         RETURNING id, natural_key_hash, (xmax = 0) AS was_inserted
       `.execute(this.db);
 
       // Count inserts vs updates using xmax
       for (const row of result.rows) {
-        hashToId.set(row.natural_key_hash, row.id);
         if (row.was_inserted) {
           totalInserted++;
+          insertedHashToId.set(row.natural_key_hash, row.id);
         } else {
           totalUpdated++;
         }
@@ -1632,7 +1640,7 @@ export class DataSyncService {
       );
     }
 
-    return { inserted: totalInserted, updated: totalUpdated, hashToId };
+    return { inserted: totalInserted, updated: totalUpdated, insertedHashToId };
   }
 
   /**
@@ -1642,7 +1650,7 @@ export class DataSyncService {
   private async batchInsertClassifications(
     matrixId: number,
     parsedRows: ParsedRow[],
-    hashToId: Map<string, number>
+    insertedHashToId: Map<string, number>
   ): Promise<void> {
     // Collect all classification associations
     const classificationValues: {
@@ -1652,7 +1660,7 @@ export class DataSyncService {
     }[] = [];
 
     for (const row of parsedRows) {
-      const statisticId = hashToId.get(row.naturalKeyHash);
+      const statisticId = insertedHashToId.get(row.naturalKeyHash);
       if (!statisticId || row.classificationValueIds.length === 0) continue;
 
       for (const cvId of row.classificationValueIds) {
@@ -1740,10 +1748,8 @@ export class DataSyncService {
       });
 
       // Batch upsert statistics
-      const { inserted, updated, hashToId } = await this.batchUpsertStatistics(
-        matrixId,
-        parsedRows
-      );
+      const { inserted, updated, insertedHashToId } =
+        await this.batchUpsertStatistics(matrixId, parsedRows);
 
       onProgress?.({
         phase: "Inserting classifications",
@@ -1752,7 +1758,11 @@ export class DataSyncService {
       });
 
       // Batch insert classifications
-      await this.batchInsertClassifications(matrixId, parsedRows, hashToId);
+      await this.batchInsertClassifications(
+        matrixId,
+        parsedRows,
+        insertedHashToId
+      );
 
       apiLogger.info(
         { inserted, updated, errors: parseErrors.length },
@@ -1885,16 +1895,21 @@ export class DataSyncService {
           .executeTakeFirst();
 
         if (existing) {
-          await this.db
-            .updateTable("statistics")
-            .set({
-              value: value,
-              value_status: valueStatus,
-              updated_at: new Date(),
-            })
-            .where("id", "=", existing.id)
-            .execute();
-          rowsUpdated++;
+          const updateResult = await sql<{ id: number }>`
+            UPDATE statistics
+            SET
+              value = ${value},
+              value_status = ${valueStatus},
+              updated_at = NOW()
+            WHERE id = ${existing.id}
+              AND (value IS DISTINCT FROM ${value}
+                OR value_status IS DISTINCT FROM ${valueStatus})
+            RETURNING id
+          `.execute(this.db);
+
+          if (updateResult.rows.length > 0) {
+            rowsUpdated++;
+          }
         } else {
           const insertResult = await this.db
             .insertInto("statistics")

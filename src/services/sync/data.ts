@@ -149,6 +149,24 @@ interface DataSyncResult {
   errors: string[];
 }
 
+/** Batch size for bulk insert operations */
+const BATCH_SIZE = 1000;
+
+/**
+ * Pre-parsed row for batch insert operations
+ * Contains all computed values needed for database insertion
+ */
+interface ParsedRow {
+  naturalKeyHash: string;
+  territoryId: number | null;
+  timePeriodId: number | null;
+  unitId: number | null;
+  value: number | null;
+  valueStatus: string | null;
+  classificationValueIds: number[];
+  sourceEncQuery: string;
+}
+
 // ============================================================================
 // Data Sync Service
 // ============================================================================
@@ -1423,9 +1441,352 @@ export class DataSyncService {
   }
 
   /**
-   * Insert parsed data into statistics table
+   * Preprocess CSV rows into ParsedRow objects for batch insertion.
+   * Performs all parsing and hash computation upfront to enable efficient batching.
+   */
+  private preprocessRows(
+    matrixId: number,
+    dimensions: DimensionInfo[],
+    rows: string[][],
+    sourceEncQuery: string
+  ): { parsedRows: ParsedRow[]; errors: string[] } {
+    const parsedRows: ParsedRow[] = [];
+    const errors: string[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]!;
+
+      try {
+        // Last column is value, others are dimension labels
+        const valueStr = row[row.length - 1] ?? "";
+        const value =
+          valueStr === ":" || valueStr === "" ? null : parseFloat(valueStr);
+        const valueStatus = valueStr === ":" ? "missing" : null;
+
+        // Find matching entities for each dimension
+        let territoryId: number | null = null;
+        let timePeriodId: number | null = null;
+        let unitId: number | null = null;
+        const classificationValueIds: number[] = [];
+
+        for (
+          let dimIdx = 0;
+          dimIdx < dimensions.length && dimIdx < row.length - 1;
+          dimIdx++
+        ) {
+          const dim = dimensions[dimIdx]!;
+          const cellLabel = row[dimIdx]!;
+
+          // Find matching nom_item by label
+          const nomItem = dim.nomItems.find(
+            (item) =>
+              item.labelRo === cellLabel ||
+              item.labelRo.includes(cellLabel) ||
+              cellLabel.includes(item.labelRo)
+          );
+
+          if (nomItem) {
+            switch (dim.dimensionType) {
+              case "TERRITORIAL":
+                territoryId = nomItem.territoryId;
+                break;
+              case "TEMPORAL":
+                timePeriodId = nomItem.timePeriodId;
+                break;
+              case "UNIT_OF_MEASURE":
+                unitId = nomItem.unitId;
+                break;
+              case "CLASSIFICATION":
+                if (nomItem.classificationValueId) {
+                  classificationValueIds.push(nomItem.classificationValueId);
+                }
+                break;
+            }
+          }
+        }
+
+        // Skip if no time period (required)
+        if (!timePeriodId) {
+          errors.push(`Row ${String(i)}: Could not resolve time period`);
+          continue;
+        }
+
+        // Generate natural key hash
+        const keyParts = [
+          matrixId,
+          territoryId ?? "null",
+          timePeriodId,
+          unitId ?? "null",
+          ...classificationValueIds.sort(),
+        ];
+        const naturalKeyHash = createHash("md5")
+          .update(keyParts.join(":"))
+          .digest("hex");
+
+        parsedRows.push({
+          naturalKeyHash,
+          territoryId,
+          timePeriodId,
+          unitId,
+          value,
+          valueStatus,
+          classificationValueIds,
+          sourceEncQuery,
+        });
+      } catch (error) {
+        errors.push(`Row ${String(i)}: ${(error as Error).message}`);
+      }
+    }
+
+    return { parsedRows, errors };
+  }
+
+  /**
+   * Batch upsert statistics using ON CONFLICT with xmax tracking.
+   * Uses PostgreSQL's xmax system column to distinguish inserts from updates.
+   */
+  private async batchUpsertStatistics(
+    matrixId: number,
+    parsedRows: ParsedRow[]
+  ): Promise<{
+    inserted: number;
+    updated: number;
+    hashToId: Map<string, number>;
+  }> {
+    let totalInserted = 0;
+    let totalUpdated = 0;
+    const hashToId = new Map<string, number>();
+
+    // Deduplicate by natural_key_hash (keep last occurrence for each hash)
+    const deduplicatedMap = new Map<string, ParsedRow>();
+    for (const row of parsedRows) {
+      deduplicatedMap.set(row.naturalKeyHash, row);
+    }
+    const deduplicatedRows = Array.from(deduplicatedMap.values());
+
+    apiLogger.debug(
+      { original: parsedRows.length, deduplicated: deduplicatedRows.length },
+      "Deduplicated rows for batch insert"
+    );
+
+    for (let i = 0; i < deduplicatedRows.length; i += BATCH_SIZE) {
+      const batch = deduplicatedRows.slice(i, i + BATCH_SIZE);
+
+      // Build values for batch insert
+      const values = batch.map((row) => ({
+        matrix_id: matrixId,
+        territory_id: row.territoryId,
+        time_period_id: row.timePeriodId,
+        unit_id: row.unitId,
+        value: row.value,
+        value_status: row.valueStatus,
+        natural_key_hash: row.naturalKeyHash,
+        source_enc_query: row.sourceEncQuery,
+      }));
+
+      // Use raw SQL for batch upsert with xmax tracking
+      // xmax = 0 means the row was inserted, otherwise it was updated
+      // Insert directly to partition table for ON CONFLICT with partial unique index
+      const partitionTable = `statistics_matrix_${String(matrixId)}`;
+      const result = await sql<{
+        id: number;
+        natural_key_hash: string;
+        was_inserted: boolean;
+      }>`
+        INSERT INTO ${sql.raw(partitionTable)} (matrix_id, territory_id, time_period_id, unit_id, value, value_status, natural_key_hash, source_enc_query)
+        SELECT
+          (v->>'matrix_id')::int,
+          (v->>'territory_id')::int,
+          (v->>'time_period_id')::int,
+          (v->>'unit_id')::int,
+          (v->>'value')::numeric,
+          v->>'value_status',
+          v->>'natural_key_hash',
+          v->>'source_enc_query'
+        FROM jsonb_array_elements(${JSON.stringify(values)}::jsonb) AS v
+        ON CONFLICT (natural_key_hash) WHERE natural_key_hash IS NOT NULL DO UPDATE SET
+          value = EXCLUDED.value,
+          value_status = EXCLUDED.value_status,
+          updated_at = NOW()
+        RETURNING id, natural_key_hash, (xmax = 0) AS was_inserted
+      `.execute(this.db);
+
+      // Count inserts vs updates using xmax
+      for (const row of result.rows) {
+        hashToId.set(row.natural_key_hash, row.id);
+        if (row.was_inserted) {
+          totalInserted++;
+        } else {
+          totalUpdated++;
+        }
+      }
+
+      apiLogger.debug(
+        {
+          batchIndex: Math.floor(i / BATCH_SIZE),
+          batchSize: batch.length,
+          inserted: result.rows.filter((r) => r.was_inserted).length,
+          updated: result.rows.filter((r) => !r.was_inserted).length,
+        },
+        "Batch upsert complete"
+      );
+    }
+
+    return { inserted: totalInserted, updated: totalUpdated, hashToId };
+  }
+
+  /**
+   * Batch insert classifications for newly inserted statistics.
+   * Uses ON CONFLICT DO NOTHING for idempotency.
+   */
+  private async batchInsertClassifications(
+    matrixId: number,
+    parsedRows: ParsedRow[],
+    hashToId: Map<string, number>
+  ): Promise<void> {
+    // Collect all classification associations
+    const classificationValues: {
+      matrix_id: number;
+      statistic_id: number;
+      classification_value_id: number;
+    }[] = [];
+
+    for (const row of parsedRows) {
+      const statisticId = hashToId.get(row.naturalKeyHash);
+      if (!statisticId || row.classificationValueIds.length === 0) continue;
+
+      for (const cvId of row.classificationValueIds) {
+        classificationValues.push({
+          matrix_id: matrixId,
+          statistic_id: statisticId,
+          classification_value_id: cvId,
+        });
+      }
+    }
+
+    if (classificationValues.length === 0) return;
+
+    // Batch insert classifications in chunks
+    for (let i = 0; i < classificationValues.length; i += BATCH_SIZE) {
+      const batch = classificationValues.slice(i, i + BATCH_SIZE);
+
+      await sql`
+        INSERT INTO statistic_classifications (matrix_id, statistic_id, classification_value_id)
+        SELECT
+          (v->>'matrix_id')::int,
+          (v->>'statistic_id')::int,
+          (v->>'classification_value_id')::int
+        FROM jsonb_array_elements(${JSON.stringify(batch)}::jsonb) AS v
+        ON CONFLICT (matrix_id, statistic_id, classification_value_id) DO NOTHING
+      `.execute(this.db);
+
+      apiLogger.debug(
+        {
+          batchIndex: Math.floor(i / BATCH_SIZE),
+          batchSize: batch.length,
+        },
+        "Classification batch insert complete"
+      );
+    }
+  }
+
+  /**
+   * Insert parsed data into statistics table using batch operations.
+   * Falls back to row-by-row if batch fails.
    */
   private async insertData(
+    matrixId: number,
+    dimensions: DimensionInfo[],
+    rows: string[][],
+    sourceEncQuery: string,
+    onProgress?: (progress: DataSyncProgress) => void
+  ): Promise<DataSyncResult> {
+    if (rows.length === 0) {
+      return { rowsInserted: 0, rowsUpdated: 0, errors: [] };
+    }
+
+    onProgress?.({
+      phase: "Preprocessing rows",
+      current: 0,
+      total: rows.length,
+    });
+
+    // Preprocess all rows
+    const { parsedRows, errors: parseErrors } = this.preprocessRows(
+      matrixId,
+      dimensions,
+      rows,
+      sourceEncQuery
+    );
+
+    if (parsedRows.length === 0) {
+      return { rowsInserted: 0, rowsUpdated: 0, errors: parseErrors };
+    }
+
+    apiLogger.info(
+      {
+        totalRows: rows.length,
+        parsedRows: parsedRows.length,
+        parseErrors: parseErrors.length,
+      },
+      "Preprocessing complete, starting batch insert"
+    );
+
+    try {
+      onProgress?.({
+        phase: "Batch inserting statistics",
+        current: 0,
+        total: parsedRows.length,
+      });
+
+      // Batch upsert statistics
+      const { inserted, updated, hashToId } = await this.batchUpsertStatistics(
+        matrixId,
+        parsedRows
+      );
+
+      onProgress?.({
+        phase: "Inserting classifications",
+        current: inserted + updated,
+        total: parsedRows.length,
+      });
+
+      // Batch insert classifications
+      await this.batchInsertClassifications(matrixId, parsedRows, hashToId);
+
+      apiLogger.info(
+        { inserted, updated, errors: parseErrors.length },
+        "Batch insert completed successfully"
+      );
+
+      return {
+        rowsInserted: inserted,
+        rowsUpdated: updated,
+        errors: parseErrors,
+      };
+    } catch (error) {
+      // Fallback to row-by-row for debugging
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      apiLogger.warn(
+        { error: errorMsg },
+        "Batch insert failed, falling back to row-by-row"
+      );
+
+      return this.insertDataRowByRow(
+        matrixId,
+        dimensions,
+        rows,
+        sourceEncQuery,
+        onProgress
+      );
+    }
+  }
+
+  /**
+   * Insert parsed data into statistics table (row-by-row fallback)
+   * Used when batch insert fails for debugging purposes
+   */
+  private async insertDataRowByRow(
     matrixId: number,
     dimensions: DimensionInfo[],
     rows: string[][],

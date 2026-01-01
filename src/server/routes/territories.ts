@@ -90,7 +90,6 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
     },
     async (request) => {
       const {
-        locale = "ro",
         level,
         parentId,
         pathPrefix,
@@ -109,7 +108,7 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
           "id",
           "code",
           "siruta_code",
-          "names",
+          "name",
           "level",
           "parent_id",
           "path",
@@ -129,10 +128,10 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
       }
 
       if (search) {
-        // Search in normalized name (stored in JSONB)
+        // Search in name using case-insensitive normalized comparison
         query = query.where(
-          sql`names->>'normalized'`,
-          "ilike",
+          sql`UPPER(name)`,
+          "like",
           `%${search.toUpperCase()}%`
         );
       }
@@ -141,13 +140,13 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
         query = query.where("siruta_code", "=", sirutaCode);
       }
 
-      // Apply cursor using JSONB name
+      // Apply cursor using name
       if (cursorPayload) {
         query = query.where((eb) =>
           eb.or([
-            eb(sql`names->>'ro'`, ">", cursorPayload.sortValue as string),
+            eb("name", ">", cursorPayload.sortValue as string),
             eb.and([
-              eb(sql`names->>'ro'`, "=", cursorPayload.sortValue as string),
+              eb("name", "=", cursorPayload.sortValue as string),
               eb("id", ">", cursorPayload.id),
             ]),
           ])
@@ -155,7 +154,7 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
       }
 
       const rows = await query
-        .orderBy(sql`names->>'ro'`, "asc")
+        .orderBy("name", "asc")
         .orderBy("id", "asc")
         .limit(limit + 1)
         .execute();
@@ -165,7 +164,7 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
         id: t.id,
         code: t.code,
         sirutaCode: t.siruta_code,
-        name: locale === "en" && t.names.en ? t.names.en : t.names.ro,
+        name: t.name,
         level: t.level,
         parentId: t.parent_id,
         path: t.path,
@@ -207,7 +206,6 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
     },
     async (request) => {
       const id = Number.parseInt(request.params.id, 10);
-      const locale = request.query.locale ?? "ro";
 
       if (Number.isNaN(id)) {
         throw new NotFoundError("Invalid territory ID");
@@ -219,7 +217,7 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
           "id",
           "code",
           "siruta_code",
-          "names",
+          "name",
           "level",
           "parent_id",
           "path",
@@ -238,23 +236,20 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
           "id",
           "code",
           "siruta_code",
-          "names",
+          "name",
           "level",
           "parent_id",
           "path",
         ])
         .where("parent_id", "=", id)
-        .orderBy(sql`names->>'ro'`, "asc")
+        .orderBy("name", "asc")
         .execute();
 
       const territoryDto: TerritoryDto = {
         id: territory.id,
         code: territory.code,
         sirutaCode: territory.siruta_code,
-        name:
-          locale === "en" && territory.names.en
-            ? territory.names.en
-            : territory.names.ro,
+        name: territory.name,
         level: territory.level,
         parentId: territory.parent_id,
         path: territory.path,
@@ -262,7 +257,7 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
           id: c.id,
           code: c.code,
           sirutaCode: c.siruta_code,
-          name: locale === "en" && c.names.en ? c.names.en : c.names.ro,
+          name: c.name,
           level: c.level,
           parentId: c.parent_id,
           path: c.path,
@@ -318,7 +313,7 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
       // Get territory
       const territory = await db
         .selectFrom("territories")
-        .select(["id", "code", "names", "level", "path"])
+        .select(["id", "code", "name", "level", "path"])
         .where("id", "=", id)
         .executeTakeFirst();
 
@@ -397,10 +392,7 @@ export function registerTerritoryRoutes(app: FastifyInstance): void {
           territory: {
             id: territory.id,
             code: territory.code,
-            name:
-              locale === "en" && territory.names.en
-                ? territory.names.en
-                : territory.names.ro,
+            name: territory.name,
             level: territory.level,
           },
           pagination: createPaginationMeta(items, limit, "id", hasMore),

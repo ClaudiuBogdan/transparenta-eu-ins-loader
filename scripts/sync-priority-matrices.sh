@@ -103,7 +103,7 @@ for i in "${!MATRICES[@]}"; do
   echo "[$num/$TOTAL] Syncing $code (years: $YEARS)..."
   echo "────────────────────────────────────────────────────────────────────────────────"
 
-  if pnpm cli sync data "$code" --years "$YEARS"; then
+  if pnpm cli sync data --matrix "$code" --years "$YEARS"; then
     echo "✓ $code completed"
     ((SUCCESS++))
   else
@@ -137,6 +137,6 @@ if [ $FAILED -gt 0 ]; then
   done
   echo ""
   echo "Retry failed matrices with:"
-  echo "  for code in ${FAILED_LIST[*]}; do pnpm cli sync data \"\$code\" --years $YEARS; done"
+  echo "  for code in ${FAILED_LIST[*]}; do pnpm cli sync data --matrix \"\$code\" --years $YEARS; done"
   exit 1
 fi

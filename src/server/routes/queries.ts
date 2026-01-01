@@ -412,7 +412,7 @@ export function registerQueryRoutes(app: FastifyInstance): void {
           "statistics.value_status",
           "territories.id as territory_id",
           "territories.code as territory_code",
-          "territories.names as territory_names",
+          "territories.name as territory_name",
           "territories.level as territory_level",
           "time_periods.year",
           "time_periods.periodicity",
@@ -536,9 +536,7 @@ export function registerQueryRoutes(app: FastifyInstance): void {
           ? {
               id: r.territory_id,
               code: r.territory_code,
-              name: r.territory_names
-                ? getLocalizedName(r.territory_names, locale)
-                : null,
+              name: r.territory_name ?? null,
               level: r.territory_level,
             }
           : null,

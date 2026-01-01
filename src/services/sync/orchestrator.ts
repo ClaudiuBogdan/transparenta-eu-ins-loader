@@ -76,11 +76,10 @@ export class SyncOrchestrator {
     };
 
     try {
-      // 1. Seed static data
-      logger.info("Seeding NUTS hierarchy...");
-      await this.labelResolver.getTerritoryService().seedNutsHierarchy();
+      // NOTE: Territories must be pre-seeded using `pnpm cli seed territories`
+      // The sync process no longer creates territories dynamically
 
-      // 2. Sync contexts
+      // 1. Sync contexts
       if (options.contexts !== false) {
         logger.info("Syncing contexts...");
         result.contexts = await this.syncContexts();

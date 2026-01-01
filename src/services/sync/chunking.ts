@@ -1,18 +1,15 @@
 /**
  * Chunk Generator - Generates chunks for syncing matrix data
  *
- * Handles the 30,000 cell limit by:
- * 1. For UAT-level matrices: chunks by county + year
- * 2. For county-level matrices: chunks by year
- * 3. For national matrices: single chunk
- *
- * If a chunk still exceeds the limit, it can be subdivided by classification.
+ * Handles the 30,000 cell limit by adaptively splitting selections:
+ * 1. Build dimension axes from metadata (time, territory, classification, etc.)
+ * 2. Start with maximal selections and split along a priority order
+ * 3. Enforce deterministic chunk signatures for resumability
  */
 
 import { createHash } from "node:crypto";
 
 import { apiLogger } from "../../logger.js";
-import { COUNTIES } from "./canonical/territories.js";
 import { estimateCellCount } from "../../scraper/client.js";
 
 import type {
@@ -34,16 +31,25 @@ export type TerritoryLevel = "national" | "county" | "uat";
 
 /** A sync chunk represents a unit of work for syncing */
 export interface SyncChunk {
-  /** County code (e.g., "AB" for Alba) - null for national/county-aggregate chunks */
-  countyCode: string | null;
-  /** Year to sync (single year per chunk for UAT data) */
-  year: number;
+  /** Unique hash for checkpoint tracking */
+  chunkHash: string;
+  /** Human-readable chunk summary */
+  chunkQuery: string;
+  /** EncQuery selections per dimension */
+  selections: number[][];
+  /** Estimated cell count */
+  cellCount: number;
+  /** Estimated CSV size in bytes (approximate) */
+  estimatedCsvBytes: number;
   /** Classification mode - 'all' syncs all breakdowns, 'totals-only' syncs only aggregates */
   classificationMode: ClassificationMode;
   /** Territory level - determines what territorial data to include */
   territoryLevel: TerritoryLevel;
-  /** Unique hash for checkpoint tracking */
-  chunkHash: string;
+  /** County code (e.g., "AB" for Alba) - null for national/county-aggregate chunks */
+  countyCode: string | null;
+  /** Year range covered by the chunk */
+  yearFrom: number | null;
+  yearTo: number | null;
 }
 
 /** Matrix info needed for chunk generation */
@@ -81,6 +87,8 @@ export interface ChunkGeneratorOptions {
   classificationMode: ClassificationMode;
   /** Specific county to sync (for targeted sync) */
   countyCode?: string;
+  /** Override cell limit (default: 30,000) */
+  cellLimit?: number;
 }
 
 /** Result of chunk generation */
@@ -92,6 +100,34 @@ export interface ChunkGenerationResult {
   hasCountyData: boolean;
 }
 
+interface AxisGroup {
+  selections: Map<number, number[]>;
+  optionIds?: number[];
+  optionCount: number;
+  meta?: {
+    countyCode?: string;
+  };
+}
+
+interface Axis {
+  axisId: string;
+  kind:
+    | "temporal"
+    | "classification"
+    | "territorial"
+    | "unit"
+    | "paired-territorial";
+  dimIndices: number[];
+  dimIndex?: number;
+  groups: AxisGroup[];
+  splitPriority: number;
+  canSplit: boolean;
+}
+
+interface ChunkPlan {
+  groups: AxisGroup[];
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -99,30 +135,23 @@ export interface ChunkGenerationResult {
 const CELL_LIMIT = 30_000;
 const RATE_LIMIT_MS = 750;
 
-// County codes extracted from COUNTIES array
-export const COUNTY_CODES = COUNTIES.map((c) => c.code);
-
 // ============================================================================
 // Chunk Generator
 // ============================================================================
 
 export class ChunkGenerator {
-  // Store detected dimension indexes for use in buildChunkSelections
-  private detectedLocalityDimIndex: number | null = null;
-  private detectedCountyDimIndex: number | null = null;
-
   constructor(private readonly db: Kysely<Database>) {}
 
   /**
    * Generate chunks for a matrix based on its structure
    */
-  generateChunks(
+  async generateChunks(
     matrix: MatrixInfo,
     options: ChunkGeneratorOptions
-  ): ChunkGenerationResult {
-    const { yearFrom, yearTo, classificationMode, countyCode } = options;
-    const years = this.generateYearRange(yearFrom, yearTo);
+  ): Promise<ChunkGenerationResult> {
+    const { classificationMode, countyCode, cellLimit } = options;
     const chunks: SyncChunk[] = [];
+    const effectiveLimit = Math.min(cellLimit ?? CELL_LIMIT, CELL_LIMIT);
 
     const hasUatData = matrix.metadata.flags.hasUatData;
     const hasCountyData = matrix.metadata.flags.hasCountyData;
@@ -152,10 +181,6 @@ export class ChunkGenerator {
       }
     }
 
-    // Store detected indexes for use in buildChunkSelections
-    this.detectedLocalityDimIndex = localityDimIndex ?? null;
-    this.detectedCountyDimIndex = countyDimIndex ?? null;
-
     apiLogger.debug(
       {
         matrixCode: matrix.insCode,
@@ -163,89 +188,111 @@ export class ChunkGenerator {
         hasCountyData,
         localityDimIndex,
         countyDimIndex,
-        years: years.length,
+        yearFrom: options.yearFrom,
+        yearTo: options.yearTo,
+        classificationMode,
+        cellLimit: effectiveLimit,
       },
-      "Generating chunks"
+      "Generating adaptive chunks"
     );
 
     if (hasUatData && localityDimIndex != null) {
-      // UAT-level matrix: TWO types of chunks
-
-      // 1. County-aggregate chunk: All counties WITHOUT localities
-      //    Cell count: 43 counties × classifications × 1 year ≈ 13,416 cells
       if (!countyCode) {
-        for (const year of years) {
-          chunks.push({
-            countyCode: null,
-            year,
-            classificationMode,
-            territoryLevel: "county",
-            chunkHash: this.computeChunkHash(
-              matrix.insCode,
-              "COUNTIES",
-              year,
-              classificationMode
-            ),
-          });
-        }
+        const aggregateChunks = await this.planChunks(matrix, options, {
+          territoryLevel: "county",
+          countyCode: null,
+          useUatPairing: false,
+          localityDimIndex: localityDimIndex ?? null,
+          countyDimIndex: countyDimIndex ?? null,
+          cellLimit: effectiveLimit,
+        });
+        chunks.push(...aggregateChunks);
       }
 
-      // 2. UAT-detail chunks: Per county with localities
-      //    Cell count: ~76 localities × classifications × 1 year ≈ 23,712 cells
-      const countiesToSync = countyCode ? [countyCode] : COUNTY_CODES;
-      for (const county of countiesToSync) {
-        for (const year of years) {
-          chunks.push({
-            countyCode: county,
-            year,
-            classificationMode,
-            territoryLevel: "uat",
-            chunkHash: this.computeChunkHash(
-              matrix.insCode,
-              county,
-              year,
-              classificationMode
-            ),
-          });
-        }
-      }
+      const detailChunks = await this.planChunks(matrix, options, {
+        territoryLevel: "uat",
+        countyCode: countyCode ?? null,
+        useUatPairing: true,
+        localityDimIndex: localityDimIndex ?? null,
+        countyDimIndex: countyDimIndex ?? null,
+        cellLimit: effectiveLimit,
+      });
+      chunks.push(...detailChunks);
     } else if (hasCountyData) {
-      // County-level matrix (no UATs): single chunk per year with all territories
-      for (const year of years) {
-        chunks.push({
-          countyCode: null,
-          year,
-          classificationMode,
-          territoryLevel: "county",
-          chunkHash: this.computeChunkHash(
-            matrix.insCode,
-            null,
-            year,
-            classificationMode
-          ),
-        });
-      }
+      const countyChunks = await this.planChunks(matrix, options, {
+        territoryLevel: "county",
+        countyCode: countyCode ?? null,
+        useUatPairing: false,
+        localityDimIndex: localityDimIndex ?? null,
+        countyDimIndex: countyDimIndex ?? null,
+        cellLimit: effectiveLimit,
+      });
+      chunks.push(...countyChunks);
     } else {
-      // National-level matrix: single chunk per year
-      for (const year of years) {
-        chunks.push({
-          countyCode: null,
-          year,
-          classificationMode,
-          territoryLevel: "national",
-          chunkHash: this.computeChunkHash(
-            matrix.insCode,
-            null,
-            year,
-            classificationMode
-          ),
-        });
-      }
+      const nationalChunks = await this.planChunks(matrix, options, {
+        territoryLevel: "national",
+        countyCode: null,
+        useUatPairing: false,
+        localityDimIndex: localityDimIndex ?? null,
+        countyDimIndex: countyDimIndex ?? null,
+        cellLimit: effectiveLimit,
+      });
+      chunks.push(...nationalChunks);
     }
 
     const estimatedApiCalls = chunks.length;
     const estimatedMs = estimatedApiCalls * RATE_LIMIT_MS;
     const estimatedDuration = this.formatDuration(estimatedMs);
+
+    if (chunks.length > 0) {
+      let totalCells = 0;
+      let minCells = Number.POSITIVE_INFINITY;
+      let maxCells = 0;
+      let totalBytes = 0;
+      let maxBytes = 0;
+      let maxChunk = chunks[0]!;
+
+      for (const chunk of chunks) {
+        totalCells += chunk.cellCount;
+        totalBytes += chunk.estimatedCsvBytes;
+        if (chunk.cellCount < minCells) {
+          minCells = chunk.cellCount;
+        }
+        if (chunk.cellCount > maxCells) {
+          maxCells = chunk.cellCount;
+          maxChunk = chunk;
+        }
+        if (chunk.estimatedCsvBytes > maxBytes) {
+          maxBytes = chunk.estimatedCsvBytes;
+        }
+      }
+
+      const avgCells = Math.round(totalCells / chunks.length);
+      const avgBytes = Math.round(totalBytes / chunks.length);
+
+      apiLogger.info(
+        {
+          matrixCode: matrix.insCode,
+          chunkCount: chunks.length,
+          cellLimit: effectiveLimit,
+          minCells,
+          maxCells,
+          avgCells,
+          totalCells,
+          maxEstimatedCsvBytes: maxBytes,
+          avgEstimatedCsvBytes: avgBytes,
+          totalEstimatedCsvBytes: totalBytes,
+          maxChunkQuery: maxChunk.chunkQuery,
+          maxChunkHash: maxChunk.chunkHash,
+        },
+        "Chunk plan summary"
+      );
+    } else {
+      apiLogger.warn(
+        { matrixCode: matrix.insCode },
+        "Chunk plan returned no chunks"
+      );
+    }
 
     apiLogger.info(
       {
@@ -265,105 +312,587 @@ export class ChunkGenerator {
     };
   }
 
-  /**
-   * Build encQuery selections for a specific chunk
-   */
-  async buildChunkSelections(
+  private async planChunks(
     matrix: MatrixInfo,
-    chunk: SyncChunk
-  ): Promise<number[][]> {
-    const selections: number[][] = [];
+    options: ChunkGeneratorOptions,
+    plan: {
+      territoryLevel: TerritoryLevel;
+      countyCode: string | null;
+      useUatPairing: boolean;
+      localityDimIndex: number | null;
+      countyDimIndex: number | null;
+      cellLimit: number;
+    }
+  ): Promise<SyncChunk[]> {
+    const axes: Axis[] = [];
+    const yearMap = new Map<number, number>();
+    const dimIndexToPosition = new Map<number, number>();
+    const avgRowBytes = this.estimateAverageRowBytes(matrix.dimensions);
+
+    for (let i = 0; i < matrix.dimensions.length; i++) {
+      const dim = matrix.dimensions[i]!;
+      dimIndexToPosition.set(dim.dimIndex, i);
+    }
+
+    if (plan.useUatPairing) {
+      if (plan.countyDimIndex == null || plan.localityDimIndex == null) {
+        throw new Error(
+          `Cannot build UAT chunking plan for ${matrix.insCode}: missing county/locality dimensions`
+        );
+      }
+
+      const pairedAxis = await this.buildUatAxis(
+        matrix,
+        plan.countyDimIndex,
+        plan.localityDimIndex,
+        plan.countyCode
+      );
+      axes.push(pairedAxis);
+    }
 
     for (const dim of matrix.dimensions) {
-      const dimSelections = await this.buildDimensionSelections(
-        matrix,
-        dim,
-        chunk
+      if (
+        plan.useUatPairing &&
+        (dim.dimIndex === plan.countyDimIndex ||
+          dim.dimIndex === plan.localityDimIndex)
+      ) {
+        continue;
+      }
+
+      if (dim.dimensionType === "TEMPORAL") {
+        const temporalOptions = this.buildTemporalOptions(
+          dim,
+          options.yearFrom,
+          options.yearTo,
+          yearMap
+        );
+        axes.push(
+          this.buildSingleAxis(
+            dim,
+            "temporal",
+            temporalOptions,
+            this.getSplitPriority("temporal")
+          )
+        );
+        continue;
+      }
+
+      if (dim.dimensionType === "TERRITORIAL") {
+        const selections = await this.buildTerritorialSelections(
+          matrix,
+          dim,
+          plan.territoryLevel,
+          plan.countyCode,
+          plan.countyDimIndex,
+          plan.localityDimIndex
+        );
+        axes.push(
+          this.buildSingleAxis(
+            dim,
+            "territorial",
+            selections,
+            this.getSplitPriority("territorial")
+          )
+        );
+        continue;
+      }
+
+      if (dim.dimensionType === "CLASSIFICATION") {
+        const selections = this.buildClassificationSelections(
+          dim,
+          options.classificationMode
+        );
+        axes.push(
+          this.buildSingleAxis(
+            dim,
+            "classification",
+            selections,
+            this.getSplitPriority("classification")
+          )
+        );
+        continue;
+      }
+
+      if (dim.dimensionType === "UNIT_OF_MEASURE") {
+        const selections = dim.nomItems.map((item) => item.nomItemId);
+        axes.push(
+          this.buildSingleAxis(
+            dim,
+            "unit",
+            selections,
+            this.getSplitPriority("unit")
+          )
+        );
+        continue;
+      }
+
+      // Unknown dimension types: select all
+      const selections = dim.nomItems.map((item) => item.nomItemId);
+      axes.push(
+        this.buildSingleAxis(
+          dim,
+          "classification",
+          selections,
+          this.getSplitPriority("classification")
+        )
       );
-      selections.push(dimSelections);
+    }
+
+    axes.sort((a, b) => {
+      if (a.splitPriority !== b.splitPriority) {
+        return a.splitPriority - b.splitPriority;
+      }
+      return a.axisId.localeCompare(b.axisId);
+    });
+
+    const initialPlans = this.buildInitialPlans(axes);
+    const finalChunks: SyncChunk[] = [];
+
+    const pending = [...initialPlans];
+    while (pending.length > 0) {
+      const planItem = pending.pop();
+      if (!planItem) continue;
+
+      const selections = this.buildSelectionsFromPlan(
+        matrix,
+        axes,
+        planItem.groups
+      );
+      const cappedCellCount = this.estimateCellCountCapped(
+        selections,
+        plan.cellLimit
+      );
+
+      if (cappedCellCount <= plan.cellLimit) {
+        finalChunks.push(
+          this.materializeChunk(
+            matrix,
+            axes,
+            planItem.groups,
+            selections,
+            avgRowBytes,
+            yearMap,
+            dimIndexToPosition,
+            options.classificationMode,
+            plan.territoryLevel,
+            plan.countyCode
+          )
+        );
+        continue;
+      }
+
+      const splitIndex = this.pickSplitAxisIndex(
+        axes,
+        planItem.groups,
+        selections,
+        plan.cellLimit,
+        dimIndexToPosition
+      );
+
+      if (splitIndex == null) {
+        throw new Error(
+          `Unable to split chunk for ${matrix.insCode} within cell limit`
+        );
+      }
+
+      const axis = axes[splitIndex]!;
+      const group = planItem.groups[splitIndex]!;
+      const splitGroups = this.splitAxisGroup(
+        axis,
+        group,
+        selections,
+        plan.cellLimit,
+        dimIndexToPosition
+      );
+
+      for (const nextGroup of splitGroups) {
+        const nextGroups = [...planItem.groups];
+        nextGroups[splitIndex] = nextGroup;
+        pending.push({ groups: nextGroups });
+      }
+    }
+
+    return finalChunks;
+  }
+
+  private buildTemporalOptions(
+    dim: DimensionInfo,
+    yearFrom: number,
+    yearTo: number,
+    yearMap: Map<number, number>
+  ): number[] {
+    const selections: number[] = [];
+
+    for (const item of dim.nomItems) {
+      const match = /\d{4}/.exec(item.labelRo);
+      if (!match) continue;
+      const year = Number.parseInt(match[0], 10);
+      if (Number.isNaN(year)) continue;
+
+      yearMap.set(item.nomItemId, year);
+      if (year >= yearFrom && year <= yearTo) {
+        selections.push(item.nomItemId);
+      }
+    }
+
+    if (selections.length === 0) {
+      const fallback = dim.nomItems[0];
+      if (fallback) {
+        const match = /\d{4}/.exec(fallback.labelRo);
+        if (match) {
+          yearMap.set(fallback.nomItemId, Number.parseInt(match[0], 10));
+        }
+        apiLogger.warn(
+          { yearFrom, yearTo, dimIndex: dim.dimIndex },
+          "No temporal items match year range, taking first"
+        );
+        return [fallback.nomItemId];
+      }
     }
 
     return selections;
   }
 
-  /**
-   * Build selections for a single dimension
-   */
-  private async buildDimensionSelections(
-    matrix: MatrixInfo,
+  private buildSingleAxis(
     dim: DimensionInfo,
-    chunk: SyncChunk
-  ): Promise<number[]> {
-    switch (dim.dimensionType) {
-      case "TEMPORAL":
-        return this.buildTemporalSelections(dim, chunk.year);
+    kind: Axis["kind"],
+    selectionIds: number[],
+    splitPriority: number
+  ): Axis {
+    const options =
+      selectionIds.length > 0
+        ? selectionIds
+        : dim.nomItems[0]
+          ? [dim.nomItems[0].nomItemId]
+          : [];
+    const group = this.buildAxisGroup(dim.dimIndex, options);
 
-      case "TERRITORIAL":
-        return await this.buildTerritorialSelections(matrix, dim, chunk);
+    return {
+      axisId: `${kind}-${String(dim.dimIndex)}`,
+      kind,
+      dimIndices: [dim.dimIndex],
+      dimIndex: dim.dimIndex,
+      groups: [group],
+      splitPriority,
+      canSplit: options.length > 1,
+    };
+  }
 
-      case "CLASSIFICATION":
-        return this.buildClassificationSelections(
-          dim,
-          chunk.classificationMode
-        );
+  private buildAxisGroup(dimIndex: number, optionIds: number[]): AxisGroup {
+    return {
+      selections: new Map([[dimIndex, optionIds]]),
+      optionIds,
+      optionCount: optionIds.length,
+    };
+  }
 
-      case "UNIT_OF_MEASURE":
-        // Always take all units (usually just one)
-        return dim.nomItems.map((item) => item.nomItemId);
-
+  private getSplitPriority(kind: Axis["kind"]): number {
+    switch (kind) {
+      case "temporal":
+        return 1;
+      case "paired-territorial":
+        return 2;
+      case "territorial":
+        return 3;
+      case "classification":
+        return 4;
+      case "unit":
+        return 5;
       default:
-        // Unknown dimension type - take all
-        return dim.nomItems.map((item) => item.nomItemId);
+        return 6;
     }
   }
 
-  /**
-   * Build temporal selections for a specific year
-   */
-  private buildTemporalSelections(dim: DimensionInfo, year: number): number[] {
-    const filtered = dim.nomItems.filter((item) => {
-      const yearMatch = /\d{4}/.exec(item.labelRo);
-      if (!yearMatch) return false;
-      return Number.parseInt(yearMatch[0], 10) === year;
-    });
+  private buildInitialPlans(axes: Axis[]): ChunkPlan[] {
+    let plans: ChunkPlan[] = [{ groups: [] }];
 
-    if (filtered.length === 0) {
-      // Fallback: take first item if no year match
-      apiLogger.warn(
-        { year, dimIndex: dim.dimIndex, nomItemCount: dim.nomItems.length },
-        "No temporal items match year, taking first"
+    for (const axis of axes) {
+      const nextPlans: ChunkPlan[] = [];
+      for (const plan of plans) {
+        for (const group of axis.groups) {
+          nextPlans.push({ groups: [...plan.groups, group] });
+        }
+      }
+      plans = nextPlans;
+    }
+
+    return plans;
+  }
+
+  private buildSelectionsFromPlan(
+    matrix: MatrixInfo,
+    axes: Axis[],
+    groups: AxisGroup[]
+  ): number[][] {
+    const selectionsByDimIndex = new Map<number, number[]>();
+
+    for (let i = 0; i < axes.length; i++) {
+      const group = groups[i];
+      if (!group) continue;
+      for (const [dimIndex, ids] of group.selections) {
+        selectionsByDimIndex.set(dimIndex, ids);
+      }
+    }
+
+    return matrix.dimensions.map((dim) => {
+      return (
+        selectionsByDimIndex.get(dim.dimIndex) ??
+        dim.nomItems.map((item) => item.nomItemId)
       );
-      return dim.nomItems[0] ? [dim.nomItems[0].nomItemId] : [];
-    }
-
-    return filtered.map((item) => item.nomItemId);
+    });
   }
 
-  /**
-   * Build territorial selections based on chunk configuration
-   */
+  private estimateCellCountCapped(
+    selections: number[][],
+    limit: number
+  ): number {
+    let count = 1;
+    for (const dimSelections of selections) {
+      count *= dimSelections.length;
+      if (count > limit) {
+        return limit + 1;
+      }
+    }
+    return count;
+  }
+
+  private pickSplitAxisIndex(
+    axes: Axis[],
+    groups: AxisGroup[],
+    selections: number[][],
+    cellLimit: number,
+    dimIndexToPosition: Map<number, number>
+  ): number | null {
+    const axisOrder = axes
+      .map((axis, index) => ({ axis, index }))
+      .sort((a, b) => {
+        if (a.axis.splitPriority !== b.axis.splitPriority) {
+          return a.axis.splitPriority - b.axis.splitPriority;
+        }
+        return a.axis.axisId.localeCompare(b.axis.axisId);
+      });
+
+    for (const { axis, index } of axisOrder) {
+      if (!axis.canSplit || axis.dimIndex == null) continue;
+      const group = groups[index];
+      const optionIds = group?.optionIds ?? [];
+      if (optionIds.length <= 1) continue;
+
+      const dimPos = dimIndexToPosition.get(axis.dimIndex);
+      if (dimPos == null) continue;
+
+      const otherProduct = this.productExcept(selections, dimPos, cellLimit);
+      const maxOptions = Math.floor(cellLimit / otherProduct);
+
+      if (maxOptions >= 1 && maxOptions < optionIds.length) {
+        return index;
+      }
+    }
+
+    return null;
+  }
+
+  private splitAxisGroup(
+    axis: Axis,
+    group: AxisGroup,
+    selections: number[][],
+    cellLimit: number,
+    dimIndexToPosition: Map<number, number>
+  ): AxisGroup[] {
+    if (!axis.canSplit || axis.dimIndex == null) {
+      return [group];
+    }
+
+    const optionIds = group.optionIds ?? [];
+    if (optionIds.length <= 1) {
+      return [group];
+    }
+
+    const dimPos = dimIndexToPosition.get(axis.dimIndex);
+    if (dimPos == null) {
+      return [group];
+    }
+
+    const otherProduct = this.productExcept(selections, dimPos, cellLimit);
+    const maxOptions = Math.floor(cellLimit / otherProduct);
+
+    if (maxOptions < 1) {
+      return [group];
+    }
+
+    const chunkCount = Math.ceil(optionIds.length / maxOptions);
+    const groupSize = Math.ceil(optionIds.length / chunkCount);
+    const groups: AxisGroup[] = [];
+
+    for (let i = 0; i < optionIds.length; i += groupSize) {
+      const nextIds = optionIds.slice(i, i + groupSize);
+      groups.push(this.buildAxisGroup(axis.dimIndex, nextIds));
+    }
+
+    return groups;
+  }
+
+  private productExcept(
+    selections: number[][],
+    excludeIndex: number,
+    cap: number
+  ): number {
+    let product = 1;
+    for (let i = 0; i < selections.length; i++) {
+      if (i === excludeIndex) continue;
+      product *= selections[i]?.length ?? 0;
+      if (product > cap) {
+        return cap + 1;
+      }
+    }
+    return product;
+  }
+
+  private async buildUatAxis(
+    matrix: MatrixInfo,
+    countyDimIndex: number,
+    localityDimIndex: number,
+    countyCode: string | null
+  ): Promise<Axis> {
+    const rows = await this.db
+      .selectFrom("matrix_nom_items")
+      .innerJoin(
+        "territories",
+        "matrix_nom_items.territory_id",
+        "territories.id"
+      )
+      .select([
+        "matrix_nom_items.dim_index",
+        "matrix_nom_items.nom_item_id",
+        "territories.code",
+        "territories.level",
+        "territories.path",
+      ])
+      .where("matrix_nom_items.matrix_id", "=", matrix.id)
+      .where("matrix_nom_items.dimension_type", "=", "TERRITORIAL")
+      .where("matrix_nom_items.dim_index", "in", [
+        countyDimIndex,
+        localityDimIndex,
+      ])
+      .execute();
+
+    const counties = rows.filter(
+      (row) => row.dim_index === countyDimIndex && row.level === "NUTS3"
+    );
+    const localities = rows.filter(
+      (row) => row.dim_index === localityDimIndex && row.level === "LAU"
+    );
+
+    const countyEntries = counties
+      .map((row) => ({
+        code: row.code,
+        path: row.path,
+        nomItemId: row.nom_item_id,
+      }))
+      .filter((row) => (countyCode ? row.code === countyCode : true));
+
+    if (countyCode && countyEntries.length === 0) {
+      throw new Error(
+        `County ${countyCode} not found in matrix ${matrix.insCode}`
+      );
+    }
+
+    countyEntries.sort((a, b) => a.code.localeCompare(b.code));
+
+    const localitiesByCounty = new Map<string, number[]>();
+
+    for (const locality of localities) {
+      const localityPath = locality.path;
+      let matched: { code: string; path: string; nomItemId: number } | null =
+        null;
+
+      for (const county of countyEntries) {
+        if (
+          localityPath.startsWith(county.path) &&
+          (!matched || county.path.length > matched.path.length)
+        ) {
+          matched = county;
+        }
+      }
+
+      if (!matched) continue;
+
+      const list = localitiesByCounty.get(matched.code) ?? [];
+      list.push(locality.nom_item_id);
+      localitiesByCounty.set(matched.code, list);
+    }
+
+    const groups: AxisGroup[] = [];
+    for (const county of countyEntries) {
+      const localityIds = localitiesByCounty.get(county.code) ?? [];
+      localityIds.sort((a, b) => a - b);
+      if (localityIds.length === 0) {
+        apiLogger.warn(
+          { matrixCode: matrix.insCode, countyCode: county.code },
+          "No localities found for county"
+        );
+        continue;
+      }
+
+      groups.push({
+        selections: new Map([
+          [countyDimIndex, [county.nomItemId]],
+          [localityDimIndex, localityIds],
+        ]),
+        optionCount: 1,
+        meta: { countyCode: county.code },
+      });
+    }
+
+    if (groups.length === 0) {
+      throw new Error(`No UAT locality selections found for ${matrix.insCode}`);
+    }
+
+    return {
+      axisId: "territorial-paired",
+      kind: "paired-territorial",
+      dimIndices: [countyDimIndex, localityDimIndex],
+      groups,
+      splitPriority: this.getSplitPriority("paired-territorial"),
+      canSplit: false,
+    };
+  }
+
   private async buildTerritorialSelections(
     matrix: MatrixInfo,
     dim: DimensionInfo,
-    chunk: SyncChunk
+    territoryLevel: TerritoryLevel,
+    countyCode: string | null,
+    countyDimIndex: number | null,
+    localityDimIndex: number | null
   ): Promise<number[]> {
-    // Use detected indexes (from generateChunks) or fallback to metadata
-    const localityDimIndex =
-      this.detectedLocalityDimIndex ??
-      matrix.metadata.dimensionIndicators?.localityDimIndex;
-    const countyDimIndex =
-      this.detectedCountyDimIndex ??
-      matrix.metadata.dimensionIndicators?.countyDimIndex;
-
-    // National-level chunk: take TOTAL only for all territorial dimensions
-    if (chunk.territoryLevel === "national") {
+    if (territoryLevel === "national") {
       return this.findTotalNomItem(dim);
     }
 
-    // County-aggregate chunk: select all counties, skip localities
-    if (chunk.territoryLevel === "county" && chunk.countyCode === null) {
-      if (dim.dimIndex === countyDimIndex) {
-        // County dimension: select ALL counties (excluding TOTAL)
+    if (territoryLevel === "county") {
+      if (dim.dimIndex === localityDimIndex) {
+        return this.findTotalNomItem(dim);
+      }
+
+      if (
+        dim.dimIndex === countyDimIndex ||
+        (countyDimIndex == null && countyCode)
+      ) {
+        if (countyCode) {
+          const countyItem = await this.findCountyNomItem(
+            matrix.id,
+            dim.dimIndex,
+            countyCode
+          );
+          if (!countyItem) {
+            throw new Error(
+              `County ${countyCode} not found in matrix ${matrix.insCode}`
+            );
+          }
+          return [countyItem];
+        }
+
         const nonTotalItems = dim.nomItems.filter(
           (item) => !item.labelRo.toLowerCase().includes("total")
         );
@@ -371,75 +900,92 @@ export class ChunkGenerator {
           ? nonTotalItems.map((item) => item.nomItemId)
           : dim.nomItems.map((item) => item.nomItemId);
       }
-      if (dim.dimIndex === localityDimIndex) {
-        // Locality dimension: select ONLY Total (skip individual UATs)
-        return this.findTotalNomItem(dim);
-      }
-      // Other territorial dimension: take all
+    }
+
+    if (territoryLevel === "uat") {
       return dim.nomItems.map((item) => item.nomItemId);
     }
 
-    // County-level chunk (for county-only matrices without UATs)
-    if (chunk.territoryLevel === "county" && chunk.countyCode !== null) {
-      // Single county selected - find it
-      const countyItem = await this.findCountyNomItem(
-        matrix.id,
-        dim.dimIndex,
-        chunk.countyCode
-      );
-      if (countyItem) {
-        return [countyItem];
-      }
-      return dim.nomItems.map((item) => item.nomItemId);
-    }
-
-    // UAT-detail chunk: select single county + its localities
-    if (chunk.territoryLevel === "uat" && chunk.countyCode !== null) {
-      if (dim.dimIndex === countyDimIndex) {
-        // County dimension: select single county
-        const countyItem = await this.findCountyNomItem(
-          matrix.id,
-          dim.dimIndex,
-          chunk.countyCode
-        );
-        if (countyItem) {
-          return [countyItem];
-        }
-        apiLogger.warn(
-          {
-            matrixCode: matrix.insCode,
-            countyCode: chunk.countyCode,
-            dimIndex: dim.dimIndex,
-          },
-          "County not found in dimension, taking first item"
-        );
-        return [dim.nomItems[0]?.nomItemId ?? 1];
-      }
-
-      if (dim.dimIndex === localityDimIndex) {
-        // Locality dimension: select all localities for the county
-        const localityNomItemIds = await this.findLocalitiesInCounty(
-          matrix.id,
-          dim.dimIndex,
-          chunk.countyCode
-        );
-        if (localityNomItemIds.length > 0) {
-          return localityNomItemIds;
-        }
-        apiLogger.warn(
-          {
-            matrixCode: matrix.insCode,
-            countyCode: chunk.countyCode,
-            dimIndex: dim.dimIndex,
-          },
-          "No localities found for county"
-        );
-        return [dim.nomItems[0]?.nomItemId ?? 1];
-      }
-    }
-
-    // Default: take all items
     return dim.nomItems.map((item) => item.nomItemId);
+  }
+
+  private materializeChunk(
+    matrix: MatrixInfo,
+    axes: Axis[],
+    groups: AxisGroup[],
+    selections: number[][],
+    avgRowBytes: number,
+    yearMap: Map<number, number>,
+    dimIndexToPosition: Map<number, number>,
+    classificationMode: ClassificationMode,
+    territoryLevel: TerritoryLevel,
+    defaultCountyCode: string | null
+  ): SyncChunk {
+    const cellCount = estimateCellCount(selections);
+    const estimatedCsvBytes = Math.round(cellCount * avgRowBytes + avgRowBytes);
+
+    const temporalAxis = axes.find((axis) => axis.kind === "temporal");
+    let yearFrom: number | null = null;
+    let yearTo: number | null = null;
+
+    if (temporalAxis?.dimIndex != null) {
+      const pos = dimIndexToPosition.get(temporalAxis.dimIndex);
+      if (pos != null) {
+        const years = (selections[pos] ?? [])
+          .map((id) => yearMap.get(id))
+          .filter((year): year is number => year !== undefined);
+        if (years.length > 0) {
+          yearFrom = Math.min(...years);
+          yearTo = Math.max(...years);
+        }
+      }
+    }
+
+    const countyCode =
+      groups.find((group) => group.meta?.countyCode)?.meta?.countyCode ??
+      defaultCountyCode ??
+      null;
+
+    const dimSummary = selections
+      .map((ids, index) => `${String(index)}:${String(ids.length)}`)
+      .join(",");
+    const yearFromStr = yearFrom != null ? String(yearFrom) : "ALL";
+    const yearToStr = yearTo != null ? String(yearTo) : "ALL";
+    const chunkQuery = `T:${yearFromStr}-${yearToStr}|C:${countyCode ?? "ALL"}|L:${territoryLevel}|CL:${classificationMode}|dims:${dimSummary}`;
+    const encQuery = selections.map((ids) => ids.join(",")).join(":");
+    const signature = `v2|${matrix.insCode}|${classificationMode}|${territoryLevel}|${countyCode ?? "ALL"}|${encQuery}`;
+    const chunkHash = createHash("md5")
+      .update(signature)
+      .digest("hex")
+      .substring(0, 16);
+
+    return {
+      chunkHash,
+      chunkQuery,
+      selections,
+      cellCount,
+      estimatedCsvBytes,
+      classificationMode,
+      territoryLevel,
+      countyCode,
+      yearFrom,
+      yearTo,
+    };
+  }
+
+  private estimateAverageRowBytes(dimensions: DimensionInfo[]): number {
+    let labelBytes = 0;
+    for (const dim of dimensions) {
+      const sampleSize = Math.min(dim.nomItems.length, 50);
+      if (sampleSize === 0) continue;
+      const sample = dim.nomItems.slice(0, sampleSize);
+      const total = sample.reduce((sum, item) => sum + item.labelRo.length, 0);
+      labelBytes += total / sampleSize;
+    }
+
+    const separators = dimensions.length * 2;
+    const valueBytes = 12;
+    return Math.max(1, Math.round(labelBytes + separators + valueBytes + 1));
   }
 
   /**
@@ -508,46 +1054,6 @@ export class ChunkGenerator {
   }
 
   /**
-   * Find all locality nom_item_ids for a given county
-   */
-  private async findLocalitiesInCounty(
-    matrixId: number,
-    dimIndex: number,
-    countyCode: string
-  ): Promise<number[]> {
-    // First get the county's path
-    const county = await this.db
-      .selectFrom("territories")
-      .select("path")
-      .where("code", "=", countyCode)
-      .where("level", "=", "NUTS3")
-      .executeTakeFirst();
-
-    if (!county) {
-      return [];
-    }
-
-    const countyPath = county.path as unknown as string;
-
-    // Find all LAU localities under this county
-    const localities = await this.db
-      .selectFrom("matrix_nom_items")
-      .innerJoin(
-        "territories",
-        "matrix_nom_items.territory_id",
-        "territories.id"
-      )
-      .select("matrix_nom_items.nom_item_id")
-      .where("matrix_nom_items.matrix_id", "=", matrixId)
-      .where("matrix_nom_items.dim_index", "=", dimIndex)
-      .where("territories.level", "=", "LAU")
-      .$call((qb) => qb.where("territories.path", "~", `${countyPath}.*`))
-      .execute();
-
-    return localities.map((l) => l.nom_item_id);
-  }
-
-  /**
    * Estimate cell count for a chunk
    */
   estimateCellCount(selections: number[][]): number {
@@ -559,30 +1065,6 @@ export class ChunkGenerator {
    */
   wouldExceedLimit(selections: number[][]): boolean {
     return this.estimateCellCount(selections) > CELL_LIMIT;
-  }
-
-  /**
-   * Compute a unique hash for a chunk (for checkpoint tracking)
-   */
-  private computeChunkHash(
-    matrixCode: string,
-    countyCode: string | null,
-    year: number,
-    classificationMode: ClassificationMode
-  ): string {
-    const key = `${matrixCode}:${countyCode ?? "NAT"}:${String(year)}:${classificationMode}`;
-    return createHash("md5").update(key).digest("hex").substring(0, 16);
-  }
-
-  /**
-   * Generate an array of years from a range
-   */
-  private generateYearRange(from: number, to: number): number[] {
-    const years: number[] = [];
-    for (let y = from; y <= to; y++) {
-      years.push(y);
-    }
-    return years;
   }
 
   /**
@@ -692,7 +1174,13 @@ export function getChunkDisplayName(chunk: SyncChunk): string {
   } else {
     prefix = chunk.countyCode ?? "NAT";
   }
-  return `${prefix}-${String(chunk.year)}-${chunk.territoryLevel}`;
+  const yearLabel =
+    chunk.yearFrom !== null
+      ? chunk.yearTo !== null && chunk.yearTo !== chunk.yearFrom
+        ? `${String(chunk.yearFrom)}-${String(chunk.yearTo)}`
+        : String(chunk.yearFrom)
+      : "ALL";
+  return `${prefix}-${yearLabel}-${chunk.territoryLevel}`;
 }
 
 /**

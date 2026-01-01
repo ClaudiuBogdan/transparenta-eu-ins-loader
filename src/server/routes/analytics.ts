@@ -237,13 +237,8 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
       },
     },
     async (request) => {
-      const {
-        locale = "ro",
-        matrixCode,
-        territoryIds,
-        year,
-        classificationValueId,
-      } = request.query;
+      const { matrixCode, territoryIds, year, classificationValueId } =
+        request.query;
 
       const matrix = await getMatrix(matrixCode);
 
@@ -276,7 +271,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         .select([
           "territories.id as territory_id",
           "territories.code as territory_code",
-          "territories.names as territory_names",
+          "territories.name as territory_name",
           "territories.level as territory_level",
           "statistics.value",
           sql<number>`ROW_NUMBER() OVER (ORDER BY statistics.value DESC NULLS LAST)`.as(
@@ -304,7 +299,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
       const territories = rows.map((r) => ({
         id: r.territory_id,
         code: r.territory_code,
-        name: getLocalizedName(r.territory_names, locale),
+        name: r.territory_name,
         level: r.territory_level,
         value: r.value,
         rank: r.rank,
@@ -505,7 +500,6 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
     async (request) => {
       const { matrixCode } = request.params;
       const {
-        locale = "ro",
         year,
         territoryLevel,
         classificationValueId,
@@ -534,7 +528,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         .select([
           "territories.id as territory_id",
           "territories.code as territory_code",
-          "territories.names as territory_names",
+          "territories.name as territory_name",
           "territories.level as territory_level",
           "statistics.value",
           sql<number>`ROW_NUMBER() OVER (ORDER BY statistics.value ${sql.raw(orderDirection)} NULLS ${sql.raw(nullsPosition)})`.as(
@@ -583,7 +577,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         territory: {
           id: r.territory_id,
           code: r.territory_code,
-          name: getLocalizedName(r.territory_names, locale),
+          name: r.territory_name,
           level: r.territory_level,
         },
         value: r.value,
@@ -756,7 +750,6 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
     async (request) => {
       const { matrixCode } = request.params;
       const {
-        locale = "ro",
         year,
         parentTerritoryId,
         aggregateFunction = "SUM",
@@ -768,7 +761,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
       // Get parent territory path
       const parent = await db
         .selectFrom("territories")
-        .select(["id", "code", "path", "names", "level"])
+        .select(["id", "code", "path", "name", "level"])
         .where("id", "=", parentTerritoryId)
         .executeTakeFirst();
 
@@ -836,7 +829,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         .select([
           "territories.id as territory_id",
           "territories.code as territory_code",
-          "territories.names as territory_names",
+          "territories.name as territory_name",
           "territories.level as territory_level",
           "statistics.value",
         ])
@@ -849,7 +842,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
       const children = childrenQuery.map((c) => ({
         id: c.territory_id,
         code: c.territory_code,
-        name: getLocalizedName(c.territory_names, locale),
+        name: c.territory_name,
         level: c.territory_level,
         value: c.value,
       }));
@@ -875,7 +868,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
           parent: {
             id: parent.id,
             code: parent.code,
-            name: getLocalizedName(parent.names, locale),
+            name: parent.name,
             level: parent.level,
           },
           aggregateByLevel: byLevel,
@@ -1024,14 +1017,8 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
     },
     async (request) => {
       const { matrixCode } = request.params;
-      const {
-        locale = "ro",
-        rowDimension,
-        colDimension,
-        territoryId,
-        yearFrom,
-        yearTo,
-      } = request.query;
+      const { rowDimension, colDimension, territoryId, yearFrom, yearTo } =
+        request.query;
 
       if (rowDimension === colDimension) {
         throw new NotFoundError("Row and column dimensions must be different");
@@ -1051,7 +1038,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         .select([
           "territories.id as territory_id",
           "territories.code as territory_code",
-          "territories.names as territory_names",
+          "territories.name as territory_name",
           "time_periods.year",
           "statistics.value",
         ])
@@ -1100,7 +1087,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
 
         if (rowDimension === "territory") {
           rowKey = r.territory_code;
-          rowLabel = getLocalizedName(r.territory_names, locale);
+          rowLabel = r.territory_name;
         } else {
           rowKey = String(r.year);
           rowLabel = String(r.year);
@@ -1111,7 +1098,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
           colLabel = String(r.year);
         } else {
           colKey = r.territory_code;
-          colLabel = getLocalizedName(r.territory_names, locale);
+          colLabel = r.territory_name;
         }
 
         return {

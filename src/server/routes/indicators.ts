@@ -186,7 +186,7 @@ export function registerIndicatorRoutes(app: FastifyInstance): void {
       if (territoryId) {
         const t = await db
           .selectFrom("territories")
-          .select(["id", "code", "names", "level"])
+          .select(["id", "code", "name", "level"])
           .where("id", "=", territoryId)
           .executeTakeFirst();
 
@@ -194,7 +194,7 @@ export function registerIndicatorRoutes(app: FastifyInstance): void {
           territory = {
             id: t.id,
             code: t.code,
-            name: locale === "en" && t.names.en ? t.names.en : t.names.ro,
+            name: t.name,
             level: t.level,
           };
         }

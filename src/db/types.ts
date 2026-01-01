@@ -94,39 +94,6 @@ export interface SirutaMetadata {
 }
 
 // ============================================================================
-// RAW LAYER Tables
-// ============================================================================
-
-/**
- * raw_api_responses - Store raw INS API responses for debugging
- */
-export interface RawApiResponsesTable {
-  id: Generated<number>;
-  endpoint: string;
-  request_params: Record<string, unknown> | null;
-  response_ro: Record<string, unknown>;
-  response_en: Record<string, unknown> | null;
-  fetched_at: Generated<Date>;
-}
-
-/**
- * raw_dimension_options - Raw dimension options before resolution
- */
-export interface RawDimensionOptionsTable {
-  id: Generated<number>;
-  matrix_code: string;
-  dim_index: number;
-  dim_label_ro: string;
-  dim_label_en: string | null;
-  nom_item_id: number;
-  label_ro: string;
-  label_en: string | null;
-  offset_order: number;
-  parent_nom_item_id: number | null;
-  fetched_at: Generated<Date>;
-}
-
-// ============================================================================
 // CANONICAL LAYER Tables
 // ============================================================================
 
@@ -155,7 +122,7 @@ export interface TerritoriesTable {
   level: TerritoryLevel;
   path: string; // ltree stored as string
   parent_id: number | null;
-  names: BilingualText;
+  name: string; // Romanian name (use normalizeText() for comparisons)
   siruta_metadata: SirutaMetadata | null;
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
@@ -347,6 +314,9 @@ export interface SyncCheckpointsTable {
   cells_returned: number | null;
   error_message: string | null;
   retry_count: Generated<number>;
+  // Lease-based locking (auto-expiring)
+  locked_until: Date | null; // NULL = available, > NOW() = locked, <= NOW() = expired
+  locked_by: string | null; // Worker ID for debugging
 }
 
 /**
@@ -454,6 +424,9 @@ export interface SyncJobsTable {
   rows_updated: number;
   error_message: string | null;
   created_by: string | null;
+  // Lease-based locking (auto-expiring)
+  locked_until: Date | null; // NULL = available, > NOW() = locked, <= NOW() = expired
+  locked_by: string | null; // Worker ID for debugging
 }
 
 // ============================================================================
@@ -572,10 +545,6 @@ export interface CompositeIndicatorConfig {
 // ============================================================================
 
 export interface Database {
-  // Raw layer
-  raw_api_responses: RawApiResponsesTable;
-  raw_dimension_options: RawDimensionOptionsTable;
-
   // Canonical layer
   contexts: ContextsTable;
   territories: TerritoriesTable;
@@ -610,13 +579,6 @@ export interface Database {
 // ============================================================================
 // Row Types (for convenience)
 // ============================================================================
-
-// Raw layer
-export type RawApiResponse = Selectable<RawApiResponsesTable>;
-export type NewRawApiResponse = Insertable<RawApiResponsesTable>;
-
-export type RawDimensionOption = Selectable<RawDimensionOptionsTable>;
-export type NewRawDimensionOption = Insertable<RawDimensionOptionsTable>;
 
 // Contexts
 export type Context = Selectable<ContextsTable>;

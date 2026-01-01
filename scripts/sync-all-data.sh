@@ -3,7 +3,7 @@
 # Full data sync for all matrices with metadata
 #
 # Usage:
-#   ./scripts/sync-all-data.sh              # Default: all years
+#   ./scripts/sync-all-data.sh              # Default: 2020-current
 #   ./scripts/sync-all-data.sh 2020-2024    # Custom year range
 #   ./scripts/sync-all-data.sh --limit 100  # Limit to first 100 matrices
 
@@ -39,7 +39,7 @@ echo "╠═══════════════════════�
 if [ -n "$YEARS" ]; then
 echo "║  Years:    $YEARS                                                            ║"
 else
-echo "║  Years:    All available                                                     ║"
+echo "║  Years:    Default (2020-current)                                            ║"
 fi
 if [ -n "$LIMIT" ]; then
 echo "║  Limit:    $LIMIT matrices                                                   ║"
@@ -55,7 +55,7 @@ sleep 5
 START_TIME=$(date +%s)
 
 # Run the CLI command with continue-on-error flag
-pnpm cli sync data-all $YEAR_FLAG $LIMIT_FLAG --continue-on-error
+pnpm cli sync data $YEAR_FLAG $LIMIT_FLAG --continue-on-error
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))

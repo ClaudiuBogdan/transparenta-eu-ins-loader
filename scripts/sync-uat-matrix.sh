@@ -78,7 +78,7 @@ for i in "${!COUNTIES[@]}"; do
   echo -n "[$COUNTY_INDEX/42] $COUNTY_CODE... "
 
   # Sync this county's localities
-  if OUTPUT=$(pnpm cli sync data "$MATRIX_CODE" --years "$YEAR_RANGE" --county "$COUNTY_CODE" 2>&1); then
+  if OUTPUT=$(pnpm cli sync data --matrix "$MATRIX_CODE" --years "$YEAR_RANGE" --county "$COUNTY_CODE" 2>&1); then
     # Extract row count from output
     ROWS=$(echo "$OUTPUT" | grep -o '[0-9]* inserted' | grep -o '[0-9]*' || echo "0")
     TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
@@ -118,5 +118,5 @@ if [ ${#FAILED_COUNTIES[@]} -gt 0 ]; then
   done
   echo ""
   echo "Retry with:"
-  echo "  for c in ${FAILED_COUNTIES[*]}; do pnpm cli sync data $MATRIX_CODE --years $YEAR_RANGE --county \$c; done"
+  echo "  for c in ${FAILED_COUNTIES[*]}; do pnpm cli sync data --matrix $MATRIX_CODE --years $YEAR_RANGE --county \$c; done"
 fi

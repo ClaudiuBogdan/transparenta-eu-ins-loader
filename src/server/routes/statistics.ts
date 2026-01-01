@@ -239,7 +239,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           "time_periods.labels as tp_labels",
           "territories.id as terr_id",
           "territories.code as terr_code",
-          "territories.names as terr_names",
+          "territories.name as terr_name",
           "territories.level as terr_level",
           "territories.path as terr_path",
           "units_of_measure.id as unit_id",
@@ -423,7 +423,6 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
         // Use first row for dimensions (they should all be the same for groupBy=none)
         // We know dataRows has elements because we throw NoDataError if rows.length === 0
         const firstRow = dataRows[0]!;
-        const terrNames = firstRow.terr_names;
         const unitNames = firstRow.unit_names;
 
         series.push({
@@ -434,11 +433,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
               ? {
                   id: firstRow.terr_id,
                   code: firstRow.terr_code ?? "",
-                  name: terrNames
-                    ? locale === "en" && terrNames.en
-                      ? terrNames.en
-                      : terrNames.ro
-                    : "",
+                  name: firstRow.terr_name ?? "",
                   level: firstRow.terr_level ?? "",
                   path: firstRow.terr_path ?? "",
                 }
@@ -497,26 +492,17 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
 
         for (const [terrId, group] of territoryGroups) {
           const { info, points } = group;
-          const terrNames = info.terr_names;
           const unitNames = info.unit_names;
 
           series.push({
             seriesId: `${matrixCode}_${info.terr_code ?? String(terrId)}`,
-            name: terrNames
-              ? locale === "en" && terrNames.en
-                ? terrNames.en
-                : terrNames.ro
-              : "Unknown",
+            name: info.terr_name ?? "Unknown",
             dimensions: {
               territory: info.terr_id
                 ? {
                     id: info.terr_id,
                     code: info.terr_code ?? "",
-                    name: terrNames
-                      ? locale === "en" && terrNames.en
-                        ? terrNames.en
-                        : terrNames.ro
-                      : "",
+                    name: info.terr_name ?? "",
                     level: info.terr_level ?? "",
                     path: info.terr_path ?? "",
                   }
@@ -641,7 +627,6 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
           const classNames = Object.values(classifications)
             .map((c) => c.name)
             .join(", ");
-          const terrNames = info.terr_names;
           const unitNames = info.unit_names;
 
           series.push({
@@ -652,11 +637,7 @@ export function registerStatisticsRoutes(app: FastifyInstance): void {
                 ? {
                     id: info.terr_id,
                     code: info.terr_code ?? "",
-                    name: terrNames
-                      ? locale === "en" && terrNames.en
-                        ? terrNames.en
-                        : terrNames.ro
-                      : "",
+                    name: info.terr_name ?? "",
                     level: info.terr_level ?? "",
                     path: info.terr_path ?? "",
                   }

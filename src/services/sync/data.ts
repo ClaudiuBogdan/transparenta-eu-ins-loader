@@ -25,9 +25,28 @@ import {
   type ClassificationMode,
 } from "./chunking.js";
 import { apiLogger } from "../../logger.js";
-import { queryMatrix, buildEncQuery } from "../../scraper/client.js";
+import {
+  queryMatrix,
+  buildEncQuery,
+  estimateCellCount,
+} from "../../scraper/client.js";
 
 import type { Database, DimensionType } from "../../db/types.js";
+
+// ============================================================================
+// Lease Constants
+// ============================================================================
+
+/** Lease duration for chunk processing (2 minutes) */
+const CHUNK_LEASE_DURATION_MS = 2 * 60 * 1000;
+
+/** Generate a unique worker ID for this process */
+function generateWorkerId(): string {
+  const hostname = process.env.HOSTNAME ?? "local";
+  const pid = process.pid;
+  const random = Math.random().toString(36).substring(2, 8);
+  return `${hostname}-${String(pid)}-${random}`;
+}
 
 // ============================================================================
 // Types
@@ -69,12 +88,16 @@ export interface FullSyncOptions {
   classificationMode: ClassificationMode;
   /** Specific county to sync (for targeted sync) */
   countyCode?: string;
+  /** Override cell limit for chunk planning */
+  cellLimit?: number;
   /** Resume from last checkpoint */
   resume?: boolean;
   /** Force re-sync even if checkpoints exist */
   force?: boolean;
   /** Enable verbose debug logging */
   verbose?: boolean;
+  /** Make a single API call instead of chunking (may fail if > 30,000 cells) */
+  noChunking?: boolean;
   /** Progress callback */
   onProgress?: (progress: FullSyncProgress) => void;
 }
@@ -128,7 +151,12 @@ interface DataSyncResult {
 // ============================================================================
 
 export class DataSyncService {
-  constructor(private readonly db: Kysely<Database>) {}
+  private readonly workerId: string;
+
+  constructor(private readonly db: Kysely<Database>) {
+    this.workerId = generateWorkerId();
+    apiLogger.debug({ workerId: this.workerId }, "DataSyncService initialized");
+  }
 
   /**
    * Sync statistical data for a matrix
@@ -252,11 +280,18 @@ export class DataSyncService {
       yearTo,
       classificationMode,
       countyCode,
+      cellLimit,
       resume = true,
       force = false,
       verbose = false,
+      noChunking = false,
       onProgress,
     } = options;
+
+    // If no-chunking mode, use single API call approach
+    if (noChunking) {
+      return this.syncMatrixSingleCall(options);
+    }
 
     const startTime = Date.now();
     const result: FullSyncResult = {
@@ -278,6 +313,8 @@ export class DataSyncService {
         countyCode,
         resume,
         force,
+        cellLimit,
+        noChunking,
       },
       "Starting full matrix sync"
     );
@@ -299,11 +336,12 @@ export class DataSyncService {
       rowsUpdated: 0,
     });
 
-    const chunkResult = chunkGenerator.generateChunks(matrixInfo, {
+    const chunkResult = await chunkGenerator.generateChunks(matrixInfo, {
       yearFrom,
       yearTo,
       classificationMode,
       countyCode,
+      cellLimit,
     });
 
     apiLogger.info(
@@ -340,7 +378,7 @@ export class DataSyncService {
         rowsUpdated: result.rowsUpdated,
       });
 
-      // Check if chunk already synced (via checkpoint)
+      // Check if chunk already successfully synced (via checkpoint)
       if (resume && !force) {
         const checkpoint = await this.getCheckpoint(
           matrixInfo.id,
@@ -348,25 +386,45 @@ export class DataSyncService {
         );
         if (checkpoint) {
           if (verbose) {
-            apiLogger.debug({ chunkName, checkpoint }, "Skipping synced chunk");
+            apiLogger.debug(
+              { chunkName, chunkHash: chunk.chunkHash, checkpoint },
+              "Skipping synced chunk"
+            );
           }
           result.chunksSkipped++;
           continue;
         }
       }
 
+      // Try to claim chunk lease (prevents concurrent processing)
+      const claimed = await this.claimChunk(matrixInfo.id, chunk);
+      if (!claimed) {
+        if (verbose) {
+          apiLogger.debug(
+            { chunkName },
+            "Skipping chunk - locked by another worker"
+          );
+        }
+        result.chunksSkipped++;
+        continue;
+      }
+
       try {
         // Build selections for this chunk
-        const selections = await chunkGenerator.buildChunkSelections(
-          matrixInfo,
-          chunk
-        );
+        const selections = chunk.selections;
         const encQuery = buildEncQuery(selections);
-        const cellCount = chunkGenerator.estimateCellCount(selections);
+        const cellCount = chunk.cellCount;
 
         if (verbose) {
           apiLogger.debug(
-            { chunkName, encQuery: encQuery.substring(0, 100), cellCount },
+            {
+              chunkName,
+              chunkHash: chunk.chunkHash,
+              chunkQuery: chunk.chunkQuery,
+              encQuery: encQuery.substring(0, 100),
+              cellCount,
+              estimatedCsvBytes: chunk.estimatedCsvBytes,
+            },
             "Querying chunk"
           );
         }
@@ -418,12 +476,7 @@ export class DataSyncService {
         }
 
         // Record checkpoint
-        await this.recordCheckpoint(
-          matrixInfo.id,
-          chunk,
-          rows.length,
-          cellCount
-        );
+        await this.recordCheckpoint(matrixInfo.id, chunk, rows.length);
 
         result.chunksCompleted++;
 
@@ -472,6 +525,355 @@ export class DataSyncService {
   }
 
   /**
+   * Sync matrix with a single API call (no chunking)
+   * Used when --no-chunking flag is specified
+   */
+  private async syncMatrixSingleCall(
+    options: FullSyncOptions
+  ): Promise<FullSyncResult> {
+    const {
+      matrixCode,
+      yearFrom,
+      yearTo,
+      classificationMode,
+      countyCode,
+      force = false,
+      verbose = false,
+      onProgress,
+    } = options;
+
+    const startTime = Date.now();
+    const result: FullSyncResult = {
+      chunksCompleted: 0,
+      chunksSkipped: 0,
+      chunksFailed: 0,
+      rowsInserted: 0,
+      rowsUpdated: 0,
+      errors: [],
+      duration: 0,
+    };
+
+    apiLogger.info(
+      { matrixCode, yearFrom, yearTo, classificationMode, noChunking: true },
+      "Starting single-call matrix sync (no chunking)"
+    );
+
+    // 1. Load matrix info
+    const chunkGenerator = new ChunkGenerator(this.db);
+    const matrixInfo = await chunkGenerator.loadMatrixInfo(matrixCode);
+
+    if (!matrixInfo) {
+      throw new Error(`Matrix ${matrixCode} not found`);
+    }
+
+    // 2. Build selections for full matrix
+    onProgress?.({
+      phase: "planning",
+      chunksCompleted: 0,
+      chunksTotal: 1,
+      rowsInserted: 0,
+      rowsUpdated: 0,
+    });
+
+    const selections = this.buildFullMatrixSelections(
+      matrixInfo.dimensions.map((d) => ({
+        dimIndex: d.dimIndex,
+        dimensionType: d.dimensionType,
+        nomItems: d.nomItems.map((n) => ({
+          nomItemId: n.nomItemId,
+          dimensionType: d.dimensionType,
+          territoryId: n.territoryId,
+          timePeriodId: n.timePeriodId,
+          classificationValueId: n.classificationValueId,
+          unitId: n.unitId,
+          labelRo: n.labelRo,
+        })),
+      })),
+      yearFrom,
+      yearTo,
+      classificationMode
+    );
+
+    const cellCount = estimateCellCount(selections);
+    const CELL_LIMIT = 30_000;
+
+    // 3. Warn if estimated cells exceed limit
+    if (cellCount > CELL_LIMIT) {
+      apiLogger.warn(
+        { matrixCode, estimatedCells: cellCount, limit: CELL_LIMIT },
+        "Estimated cells exceed INS API limit - request may fail"
+      );
+      result.errors.push(
+        `Warning: Estimated ${String(cellCount)} cells exceeds ${String(CELL_LIMIT)} limit`
+      );
+    }
+
+    // 4. Check checkpoint (single checkpoint for whole matrix)
+    const chunkHash = this.computeFullSyncHash(
+      matrixCode,
+      yearFrom,
+      yearTo,
+      classificationMode,
+      countyCode
+    );
+
+    if (!force) {
+      const checkpoint = await this.getCheckpoint(matrixInfo.id, chunkHash);
+      if (checkpoint) {
+        if (verbose) {
+          apiLogger.debug(
+            { chunkHash, checkpoint },
+            "Skipping - already synced"
+          );
+        }
+        result.chunksSkipped = 1;
+        result.duration = Date.now() - startTime;
+        return result;
+      }
+    }
+
+    // 5. Build encQuery and make API call
+    const encQuery = buildEncQuery(selections);
+    const details = matrixInfo.metadata?.details as
+      | Record<string, number>
+      | undefined;
+    const matMaxDim = details?.matMaxDim ?? matrixInfo.dimensions.length;
+    const matRegJ = details?.matRegJ ?? 0;
+    const matUMSpec = details?.matUMSpec ?? 0;
+
+    onProgress?.({
+      phase: "syncing",
+      chunksCompleted: 0,
+      chunksTotal: 1,
+      currentChunk: "Full matrix (no chunking)",
+      rowsInserted: 0,
+      rowsUpdated: 0,
+    });
+
+    try {
+      if (verbose) {
+        apiLogger.debug(
+          { encQuery: encQuery.substring(0, 100), cellCount },
+          "Querying full matrix"
+        );
+      }
+
+      const csvData = await queryMatrix({
+        encQuery,
+        language: "ro",
+        matCode: matrixCode,
+        matMaxDim,
+        matRegJ,
+        matUMSpec,
+      });
+
+      // 6. Parse CSV
+      const rows = this.parseCsv(csvData);
+
+      if (verbose) {
+        apiLogger.debug({ rowCount: rows.length }, "Parsed CSV data");
+      }
+
+      // 7. Insert data
+      if (rows.length > 0) {
+        const insertResult = await this.insertData(
+          matrixInfo.id,
+          matrixInfo.dimensions.map((d) => ({
+            dimIndex: d.dimIndex,
+            dimensionType: d.dimensionType,
+            nomItems: d.nomItems.map((n) => ({
+              nomItemId: n.nomItemId,
+              dimensionType: d.dimensionType,
+              territoryId: n.territoryId,
+              timePeriodId: n.timePeriodId,
+              classificationValueId: n.classificationValueId,
+              unitId: n.unitId,
+              labelRo: n.labelRo,
+            })),
+          })),
+          rows,
+          encQuery
+        );
+
+        result.rowsInserted = insertResult.rowsInserted;
+        result.rowsUpdated = insertResult.rowsUpdated;
+        result.errors.push(...insertResult.errors);
+      }
+
+      // 8. Record checkpoint for whole sync
+      await this.recordFullSyncCheckpoint(
+        matrixInfo.id,
+        chunkHash,
+        yearFrom,
+        yearTo,
+        classificationMode,
+        countyCode,
+        rows.length,
+        cellCount
+      );
+
+      result.chunksCompleted = 1;
+
+      apiLogger.info(
+        { matrixCode, rowCount: rows.length },
+        "Single-call sync complete"
+      );
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      apiLogger.error(
+        { matrixCode, error: errorMsg },
+        "Single-call sync failed"
+      );
+      result.chunksFailed = 1;
+      result.errors.push(`Full sync failed: ${errorMsg}`);
+
+      // Record failed checkpoint
+      await this.recordFullSyncCheckpoint(
+        matrixInfo.id,
+        chunkHash,
+        yearFrom,
+        yearTo,
+        classificationMode,
+        countyCode,
+        0,
+        cellCount,
+        errorMsg
+      );
+    }
+
+    // 9. Update coverage
+    onProgress?.({
+      phase: "updating_coverage",
+      chunksCompleted: result.chunksCompleted,
+      chunksTotal: 1,
+      rowsInserted: result.rowsInserted,
+      rowsUpdated: result.rowsUpdated,
+    });
+
+    await this.updateCoverage(matrixInfo.id);
+
+    result.duration = Date.now() - startTime;
+
+    apiLogger.info(
+      {
+        matrixCode,
+        ...result,
+        durationSec: Math.round(result.duration / 1000),
+      },
+      "Single-call matrix sync completed"
+    );
+
+    return result;
+  }
+
+  /**
+   * Build selections for full matrix sync (no chunking)
+   */
+  private buildFullMatrixSelections(
+    dimensions: DimensionInfo[],
+    yearFrom: number,
+    yearTo: number,
+    classificationMode: ClassificationMode
+  ): number[][] {
+    return dimensions.map((dim) => {
+      // TEMPORAL: filter by year range
+      if (dim.dimensionType === "TEMPORAL") {
+        const filtered = dim.nomItems.filter((item) => {
+          const yearMatch = /\d{4}/.exec(item.labelRo);
+          if (!yearMatch) return false;
+          const year = Number.parseInt(yearMatch[0], 10);
+          return year >= yearFrom && year <= yearTo;
+        });
+        if (filtered.length === 0) {
+          return dim.nomItems[0] ? [dim.nomItems[0].nomItemId] : [];
+        }
+        return filtered.map((item) => item.nomItemId);
+      }
+
+      // TERRITORIAL: take all items (no chunking by county)
+      if (dim.dimensionType === "TERRITORIAL") {
+        return dim.nomItems.map((item) => item.nomItemId);
+      }
+
+      // CLASSIFICATION: respect classificationMode
+      if (dim.dimensionType === "CLASSIFICATION") {
+        if (classificationMode === "totals-only") {
+          // Find TOTAL item
+          const totalItem = dim.nomItems.find(
+            (item) =>
+              item.labelRo.toLowerCase() === "total" ||
+              item.labelRo.toLowerCase().startsWith("total")
+          );
+          return totalItem
+            ? [totalItem.nomItemId]
+            : [dim.nomItems[0]?.nomItemId ?? 1];
+        }
+        // "all" mode: take all classifications
+        return dim.nomItems.map((item) => item.nomItemId);
+      }
+
+      // UNIT_OF_MEASURE and others: take all
+      return dim.nomItems.map((item) => item.nomItemId);
+    });
+  }
+
+  /**
+   * Compute hash for full matrix sync checkpoint
+   */
+  private computeFullSyncHash(
+    matrixCode: string,
+    yearFrom: number,
+    yearTo: number,
+    classificationMode: ClassificationMode,
+    countyCode?: string
+  ): string {
+    const key = `${matrixCode}:FULL:${String(yearFrom)}-${String(yearTo)}:${classificationMode}:${countyCode ?? "ALL"}`;
+    return createHash("md5").update(key).digest("hex").substring(0, 16);
+  }
+
+  /**
+   * Record checkpoint for full sync
+   */
+  private async recordFullSyncCheckpoint(
+    matrixId: number,
+    chunkHash: string,
+    yearFrom: number,
+    yearTo: number,
+    classificationMode: ClassificationMode,
+    countyCode: string | undefined,
+    rowCount: number,
+    cellsQueried: number,
+    errorMessage?: string
+  ): Promise<void> {
+    await this.db
+      .insertInto("sync_checkpoints")
+      .values({
+        matrix_id: matrixId,
+        chunk_hash: chunkHash,
+        chunk_query: `FULL:${String(yearFrom)}-${String(yearTo)}:${classificationMode}`,
+        county_code: countyCode ?? null,
+        year: null, // null indicates full range
+        classification_mode: classificationMode,
+        cells_queried: cellsQueried,
+        cells_returned: rowCount,
+        row_count: rowCount,
+        last_synced_at: new Date(),
+        error_message: errorMessage?.substring(0, 1000) ?? null,
+        retry_count: errorMessage ? 1 : 0,
+      })
+      .onConflict((oc) =>
+        oc.columns(["matrix_id", "chunk_hash"]).doUpdateSet({
+          row_count: rowCount,
+          cells_queried: cellsQueried,
+          cells_returned: rowCount,
+          last_synced_at: new Date(),
+          error_message: errorMessage?.substring(0, 1000) ?? null,
+        })
+      )
+      .execute();
+  }
+
+  /**
    * Get checkpoint for a chunk
    */
   private async getCheckpoint(
@@ -484,6 +886,7 @@ export class DataSyncService {
       .where("matrix_id", "=", matrixId)
       .where("chunk_hash", "=", chunkHash)
       .where("error_message", "is", null)
+      .where("cells_returned", "is not", null)
       .executeTakeFirst();
 
     if (!checkpoint) return null;
@@ -500,32 +903,40 @@ export class DataSyncService {
   private async recordCheckpoint(
     matrixId: number,
     chunk: SyncChunk,
-    rowCount: number,
-    cellsQueried: number
+    rowCount: number
   ): Promise<void> {
     await this.db
       .insertInto("sync_checkpoints")
       .values({
         matrix_id: matrixId,
         chunk_hash: chunk.chunkHash,
-        chunk_query: `${chunk.countyCode ?? "NAT"}:${String(chunk.year)}:${chunk.classificationMode}`,
+        chunk_query: chunk.chunkQuery,
         county_code: chunk.countyCode,
-        year: chunk.year,
+        year:
+          chunk.yearFrom !== null && chunk.yearFrom === chunk.yearTo
+            ? chunk.yearFrom
+            : null,
         classification_mode: chunk.classificationMode,
-        cells_queried: cellsQueried,
+        cells_queried: chunk.cellCount,
         cells_returned: rowCount,
         row_count: rowCount,
         last_synced_at: new Date(),
         error_message: null,
         retry_count: 0,
+        // Clear lease on successful completion
+        locked_until: null,
+        locked_by: null,
       })
       .onConflict((oc) =>
         oc.columns(["matrix_id", "chunk_hash"]).doUpdateSet({
           row_count: rowCount,
-          cells_queried: cellsQueried,
+          cells_queried: chunk.cellCount,
           cells_returned: rowCount,
           last_synced_at: new Date(),
           error_message: null,
+          // Clear lease on successful completion
+          locked_until: null,
+          locked_by: null,
         })
       )
       .execute();
@@ -544,25 +955,144 @@ export class DataSyncService {
       .values({
         matrix_id: matrixId,
         chunk_hash: chunk.chunkHash,
-        chunk_query: `${chunk.countyCode ?? "NAT"}:${String(chunk.year)}:${chunk.classificationMode}`,
+        chunk_query: chunk.chunkQuery,
         county_code: chunk.countyCode,
-        year: chunk.year,
+        year:
+          chunk.yearFrom !== null && chunk.yearFrom === chunk.yearTo
+            ? chunk.yearFrom
+            : null,
         classification_mode: chunk.classificationMode,
-        cells_queried: null,
+        cells_queried: chunk.cellCount,
         cells_returned: null,
         row_count: 0,
         last_synced_at: new Date(),
         error_message: errorMessage.substring(0, 1000),
         retry_count: 1,
+        // Clear lease on failure (allows retry)
+        locked_until: null,
+        locked_by: null,
       })
       .onConflict((oc) =>
         oc.columns(["matrix_id", "chunk_hash"]).doUpdateSet({
           error_message: errorMessage.substring(0, 1000),
           last_synced_at: new Date(),
-          retry_count: sql`retry_count + 1`,
+          retry_count: sql`sync_checkpoints.retry_count + 1`,
+          // Clear lease on failure (allows retry)
+          locked_until: null,
+          locked_by: null,
         })
       )
       .execute();
+  }
+
+  /**
+   * Try to claim a chunk for processing using lease-based locking.
+   * Returns true if the chunk was claimed, false if it's locked by another worker.
+   */
+  private async claimChunk(
+    matrixId: number,
+    chunk: SyncChunk
+  ): Promise<boolean> {
+    const leaseExpiry = new Date(Date.now() + CHUNK_LEASE_DURATION_MS);
+    const now = new Date();
+
+    // First, check if checkpoint exists
+    const existing = await this.db
+      .selectFrom("sync_checkpoints")
+      .select(["id", "locked_by", "locked_until"])
+      .where("matrix_id", "=", matrixId)
+      .where("chunk_hash", "=", chunk.chunkHash)
+      .executeTakeFirst();
+
+    if (!existing) {
+      // No checkpoint exists - create one with lease
+      await this.db
+        .insertInto("sync_checkpoints")
+        .values({
+          matrix_id: matrixId,
+          chunk_hash: chunk.chunkHash,
+          chunk_query: chunk.chunkQuery,
+          county_code: chunk.countyCode,
+          year:
+            chunk.yearFrom !== null && chunk.yearFrom === chunk.yearTo
+              ? chunk.yearFrom
+              : null,
+          classification_mode: chunk.classificationMode,
+          cells_queried: null,
+          cells_returned: null,
+          row_count: 0,
+          last_synced_at: now,
+          error_message: null,
+          retry_count: 0,
+          locked_until: leaseExpiry,
+          locked_by: this.workerId,
+        })
+        .execute();
+
+      apiLogger.debug(
+        { chunkHash: chunk.chunkHash, workerId: this.workerId },
+        "Created checkpoint with lease"
+      );
+      return true;
+    }
+
+    // Checkpoint exists - check if we can claim it
+    // We can claim if: lease is null, expired, or we already own it
+    if (existing.locked_by === this.workerId) {
+      // We own it - extend the lease
+      await this.db
+        .updateTable("sync_checkpoints")
+        .set({ locked_until: leaseExpiry })
+        .where("id", "=", existing.id)
+        .execute();
+      return true;
+    }
+
+    if (existing.locked_until && existing.locked_until > now) {
+      // Lease is active and owned by someone else
+      apiLogger.debug(
+        {
+          chunkHash: chunk.chunkHash,
+          lockedBy: existing.locked_by,
+          lockedUntil: existing.locked_until,
+        },
+        "Chunk locked by another worker"
+      );
+      return false;
+    }
+
+    // Lease is null or expired - try to claim it
+    const updateResult = await this.db
+      .updateTable("sync_checkpoints")
+      .set({
+        locked_until: leaseExpiry,
+        locked_by: this.workerId,
+      })
+      .where("id", "=", existing.id)
+      .where((eb) =>
+        eb.or([
+          eb("locked_until", "is", null),
+          eb("locked_until", "<=", now),
+          eb("locked_by", "=", this.workerId),
+        ])
+      )
+      .executeTakeFirst();
+
+    const claimed = (updateResult.numUpdatedRows ?? 0n) > 0n;
+
+    if (claimed) {
+      apiLogger.debug(
+        { chunkHash: chunk.chunkHash, workerId: this.workerId },
+        "Claimed expired lease"
+      );
+    } else {
+      apiLogger.debug(
+        { chunkHash: chunk.chunkHash },
+        "Failed to claim - another worker got it first"
+      );
+    }
+
+    return claimed;
   }
 
   /**
@@ -620,6 +1150,26 @@ export class DataSyncService {
       .where("dimension_type", "=", "TEMPORAL")
       .executeTakeFirst();
 
+    // Get total classifications from nom_items
+    const totalClassifications = await this.db
+      .selectFrom("matrix_nom_items")
+      .select(this.db.fn.count<number>("id").as("count"))
+      .where("matrix_id", "=", matrixId)
+      .where("dimension_type", "=", "CLASSIFICATION")
+      .executeTakeFirst();
+
+    // Count unique synced classifications
+    const syncedClassifications = await this.db
+      .selectFrom("statistic_classifications")
+      .select(
+        this.db.fn
+          .count<number>("classification_value_id")
+          .distinct()
+          .as("count")
+      )
+      .where("matrix_id", "=", matrixId)
+      .executeTakeFirst();
+
     // Upsert coverage
     await this.db
       .insertInto("sync_coverage")
@@ -629,8 +1179,8 @@ export class DataSyncService {
         synced_territories: territories?.count ?? 0,
         total_years: totalYears?.count ?? 0,
         synced_years: years?.count ?? 0,
-        total_classifications: 0, // TODO: calculate
-        synced_classifications: 0,
+        total_classifications: totalClassifications?.count ?? 0,
+        synced_classifications: syncedClassifications?.count ?? 0,
         actual_data_points: stats?.total_rows ?? 0,
         expected_data_points: null,
         null_value_count: stats?.null_count ?? 0,
@@ -642,6 +1192,7 @@ export class DataSyncService {
         oc.column("matrix_id").doUpdateSet({
           synced_territories: territories?.count ?? 0,
           synced_years: years?.count ?? 0,
+          synced_classifications: syncedClassifications?.count ?? 0,
           actual_data_points: stats?.total_rows ?? 0,
           null_value_count: stats?.null_count ?? 0,
           missing_value_count: stats?.missing_count ?? 0,

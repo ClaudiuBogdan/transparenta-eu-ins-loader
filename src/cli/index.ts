@@ -15,6 +15,7 @@ import { registerExploreCommand } from "./commands/explore.js";
 import { registerMatricesCommand } from "./commands/matrices.js";
 import { registerMatrixCommand } from "./commands/matrix.js";
 import { registerQueryCommand } from "./commands/query.js";
+import { registerSeedCommand } from "./commands/seed.js";
 import { registerSyncCommand } from "./commands/sync.js";
 
 const program = new Command();
@@ -26,6 +27,7 @@ program
 
 // Register all commands
 registerDbCommand(program);
+registerSeedCommand(program);
 registerSyncCommand(program);
 registerExploreCommand(program);
 registerContextsCommand(program);

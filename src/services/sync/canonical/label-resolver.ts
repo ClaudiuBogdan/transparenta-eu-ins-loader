@@ -76,8 +76,8 @@ export class LabelResolver {
       return mapping.territory_id;
     }
 
-    // Try to resolve
-    const territoryId = await this.territoryService.findOrCreateFromLabel(
+    // Try to resolve (lookup only - territories must be pre-seeded)
+    const territoryId = await this.territoryService.findFromLabel(
       labelRo,
       labelEn
     );

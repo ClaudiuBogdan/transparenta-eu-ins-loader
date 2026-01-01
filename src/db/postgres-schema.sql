@@ -1,10 +1,9 @@
 -- ============================================================================
 -- INS Tempo Statistical Data - PostgreSQL Schema
 -- ============================================================================
--- Three-layer architecture:
---   1. Raw Layer    - Preserves exact INS API responses
---   2. Canonical    - Normalized, deduplicated entities
---   3. API Views    - Optimized for REST/GraphQL consumption
+-- Two-layer architecture:
+--   1. Canonical    - Normalized, deduplicated entities
+--   2. API Views    - Optimized for REST/GraphQL consumption
 -- ============================================================================
 
 -- Extensions
@@ -21,39 +20,6 @@ CREATE TYPE periodicity AS ENUM ('ANNUAL', 'QUARTERLY', 'MONTHLY');
 CREATE TYPE territory_level AS ENUM ('NATIONAL', 'NUTS1', 'NUTS2', 'NUTS3', 'LAU');
 CREATE TYPE sync_status AS ENUM ('PENDING', 'SYNCING', 'SYNCED', 'FAILED', 'STALE');
 CREATE TYPE dimension_type AS ENUM ('TEMPORAL', 'TERRITORIAL', 'CLASSIFICATION', 'UNIT_OF_MEASURE');
-
--- ============================================================================
--- RAW LAYER - Preserves exact INS API responses
--- ============================================================================
-
--- Store raw API responses for debugging and reprocessing
-CREATE TABLE raw_api_responses (
-    id SERIAL PRIMARY KEY,
-    endpoint TEXT NOT NULL,
-    request_params JSONB,
-    response_ro JSONB NOT NULL,
-    response_en JSONB,
-    fetched_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (endpoint, request_params)
-);
-
--- Raw dimension options (preserves nomItemId mappings before resolution)
-CREATE TABLE raw_dimension_options (
-    id SERIAL PRIMARY KEY,
-    matrix_code TEXT NOT NULL,
-    dim_index SMALLINT NOT NULL,
-    dim_label_ro TEXT NOT NULL,
-    dim_label_en TEXT,
-    nom_item_id INTEGER NOT NULL,
-    label_ro TEXT NOT NULL,
-    label_en TEXT,
-    offset_order INTEGER NOT NULL,
-    parent_nom_item_id INTEGER,
-    fetched_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (matrix_code, dim_index, nom_item_id)
-);
-
-CREATE INDEX idx_raw_dimension_options_matrix ON raw_dimension_options(matrix_code);
 
 -- ============================================================================
 -- CANONICAL LAYER - Normalized entities
@@ -86,7 +52,7 @@ CREATE TABLE territories (
     level territory_level NOT NULL,
     path ltree NOT NULL UNIQUE,  -- Unique path ensures hierarchy integrity
     parent_id INTEGER REFERENCES territories(id),
-    names JSONB NOT NULL DEFAULT '{}',  -- {"ro": "...", "en": "...", "normalized": "..."}
+    name TEXT NOT NULL,  -- Romanian name (use normalize function for comparisons)
     siruta_metadata JSONB,  -- Additional SIRUTA data (type, rang, etc.)
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -94,7 +60,8 @@ CREATE TABLE territories (
 
 CREATE INDEX idx_territories_path ON territories USING gist(path);
 CREATE INDEX idx_territories_parent ON territories(parent_id);
-CREATE INDEX idx_territories_names ON territories USING gin(names);
+CREATE INDEX idx_territories_name ON territories(name);
+CREATE INDEX idx_territories_name_lower ON territories(LOWER(name));
 CREATE INDEX idx_territories_level ON territories(level);
 CREATE INDEX idx_territories_siruta ON territories(siruta_code) WHERE siruta_code IS NOT NULL;
 
@@ -353,10 +320,23 @@ CREATE TABLE sync_checkpoints (
     chunk_query TEXT NOT NULL,
     last_synced_at TIMESTAMPTZ NOT NULL,
     row_count INTEGER DEFAULT 0,
+    -- Added in migration 002: county-year chunking
+    county_code TEXT,
+    year SMALLINT,
+    classification_mode TEXT DEFAULT 'all',
+    cells_queried INTEGER,
+    cells_returned INTEGER,
+    error_message TEXT,
+    retry_count INTEGER DEFAULT 0,
+    -- Added in migration 003: lease-based locking
+    locked_until TIMESTAMPTZ,
+    locked_by TEXT,
     UNIQUE (matrix_id, chunk_hash)
 );
 
 CREATE INDEX idx_sync_checkpoints_matrix ON sync_checkpoints(matrix_id);
+CREATE INDEX idx_sync_checkpoints_chunk_lookup ON sync_checkpoints(matrix_id, county_code, year, classification_mode);
+CREATE INDEX idx_sync_checkpoints_lease ON sync_checkpoints(matrix_id, locked_until) WHERE locked_until IS NOT NULL;
 
 -- Sync job status enum
 CREATE TYPE sync_job_status AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED');
@@ -377,11 +357,9 @@ CREATE TABLE sync_jobs (
     rows_updated INTEGER DEFAULT 0,
     error_message TEXT,
     created_by TEXT,  -- 'api', 'cli', etc.
-    CONSTRAINT chk_sync_jobs_dates CHECK (
-        (status = 'PENDING' AND started_at IS NULL AND completed_at IS NULL) OR
-        (status = 'RUNNING' AND started_at IS NOT NULL AND completed_at IS NULL) OR
-        (status IN ('COMPLETED', 'FAILED', 'CANCELLED') AND completed_at IS NOT NULL)
-    )
+    -- Added in migration 003: lease-based locking
+    locked_until TIMESTAMPTZ,
+    locked_by TEXT
 );
 
 -- Default sync configuration (year range defaults)
@@ -391,10 +369,48 @@ CREATE INDEX idx_sync_jobs_matrix ON sync_jobs(matrix_id);
 CREATE INDEX idx_sync_jobs_status ON sync_jobs(status);
 CREATE INDEX idx_sync_jobs_pending ON sync_jobs(priority DESC, created_at ASC) WHERE status = 'PENDING';
 CREATE INDEX idx_sync_jobs_created ON sync_jobs(created_at DESC);
+CREATE INDEX idx_sync_jobs_lease ON sync_jobs(priority DESC, created_at ASC) WHERE completed_at IS NULL;
 
 -- Prevent duplicate pending/running jobs for same matrix
 CREATE UNIQUE INDEX idx_sync_jobs_active_matrix ON sync_jobs(matrix_id)
     WHERE status IN ('PENDING', 'RUNNING');
+
+-- Sync coverage tracking (from migration 002)
+CREATE TABLE sync_coverage (
+    id SERIAL PRIMARY KEY,
+    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
+    total_territories INTEGER DEFAULT 0,
+    synced_territories INTEGER DEFAULT 0,
+    total_years INTEGER DEFAULT 0,
+    synced_years INTEGER DEFAULT 0,
+    total_classifications INTEGER DEFAULT 0,
+    synced_classifications INTEGER DEFAULT 0,
+    expected_data_points BIGINT,
+    actual_data_points BIGINT DEFAULT 0,
+    null_value_count BIGINT DEFAULT 0,
+    missing_value_count BIGINT DEFAULT 0,
+    first_sync_at TIMESTAMPTZ,
+    last_sync_at TIMESTAMPTZ,
+    last_coverage_update TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (matrix_id)
+);
+
+CREATE INDEX idx_sync_coverage_matrix ON sync_coverage(matrix_id);
+
+-- Per-dimension sync coverage (from migration 002)
+CREATE TABLE sync_dimension_coverage (
+    id SERIAL PRIMARY KEY,
+    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
+    dim_index SMALLINT NOT NULL,
+    dimension_type dimension_type NOT NULL,
+    total_values INTEGER NOT NULL,
+    synced_values INTEGER DEFAULT 0,
+    missing_value_ids INTEGER[] DEFAULT '{}',
+    last_updated TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (matrix_id, dim_index)
+);
+
+CREATE INDEX idx_sync_dimension_coverage_matrix ON sync_dimension_coverage(matrix_id);
 
 -- ============================================================================
 -- HELPER FUNCTIONS
@@ -502,7 +518,7 @@ BEGIN
         t.id,
         t.code,
         t.level,
-        t.names->>'ro' AS name_ro,
+        t.name AS name_ro,
         nlevel(t.path) AS depth
     FROM territories t
     WHERE t.path @> (SELECT path FROM territories WHERE territories.id = territory_id)
@@ -525,12 +541,12 @@ BEGIN
         t.id,
         t.code,
         t.level,
-        t.names->>'ro' AS name_ro,
+        t.name AS name_ro,
         nlevel(t.path) AS depth
     FROM territories t
     WHERE t.path <@ (SELECT path FROM territories WHERE territories.id = territory_id)
       AND (max_depth IS NULL OR nlevel(t.path) <= nlevel((SELECT path FROM territories WHERE territories.id = territory_id)) + max_depth)
-    ORDER BY nlevel(t.path), t.names->>'ro';
+    ORDER BY nlevel(t.path), t.name;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -571,12 +587,12 @@ SELECT
     t.siruta_code,
     t.level,
     t.path::text AS path,
-    t.names->>'ro' AS name_ro,
-    t.names->>'en' AS name_en,
-    t.names->>'normalized' AS name_normalized,
+    t.name AS name_ro,
+    NULL::text AS name_en,
+    normalize_label(t.name) AS name_normalized,
     t.parent_id,
     p.code AS parent_code,
-    p.names->>'ro' AS parent_name_ro,
+    p.name AS parent_name_ro,
     t.siruta_metadata
 FROM territories t
 LEFT JOIN territories p ON t.parent_id = p.id;
@@ -653,6 +669,115 @@ SELECT
 FROM label_mappings lm
 WHERE lm.is_unresolvable = TRUE
 ORDER BY lm.created_at DESC;
+
+-- Sync coverage view with computed percentages
+CREATE OR REPLACE VIEW sync_coverage_view AS
+SELECT
+    sc.id,
+    sc.matrix_id,
+    m.ins_code as matrix_code,
+    m.metadata->'names'->>'ro' as matrix_name,
+    sc.total_territories,
+    sc.synced_territories,
+    CASE WHEN sc.total_territories > 0
+         THEN ROUND((sc.synced_territories * 100.0 / sc.total_territories)::numeric, 1)
+         ELSE 100
+    END as territory_coverage_pct,
+    sc.total_years,
+    sc.synced_years,
+    CASE WHEN sc.total_years > 0
+         THEN ROUND((sc.synced_years * 100.0 / sc.total_years)::numeric, 1)
+         ELSE 100
+    END as year_coverage_pct,
+    sc.total_classifications,
+    sc.synced_classifications,
+    CASE WHEN sc.total_classifications > 0
+         THEN ROUND((sc.synced_classifications * 100.0 / sc.total_classifications)::numeric, 1)
+         ELSE 100
+    END as classification_coverage_pct,
+    sc.expected_data_points,
+    sc.actual_data_points,
+    CASE WHEN sc.expected_data_points > 0
+         THEN ROUND((sc.actual_data_points * 100.0 / sc.expected_data_points)::numeric, 1)
+         ELSE 0
+    END as overall_coverage_pct,
+    sc.null_value_count,
+    sc.missing_value_count,
+    sc.first_sync_at,
+    sc.last_sync_at,
+    sc.last_coverage_update
+FROM sync_coverage sc
+JOIN matrices m ON sc.matrix_id = m.id;
+
+-- Checkpoint status by county view
+CREATE OR REPLACE VIEW sync_checkpoint_summary AS
+SELECT
+    sc.matrix_id,
+    m.ins_code as matrix_code,
+    sc.county_code,
+    sc.year,
+    sc.classification_mode,
+    COUNT(*) as chunk_count,
+    SUM(sc.row_count) as total_rows,
+    MIN(sc.last_synced_at) as first_sync,
+    MAX(sc.last_synced_at) as last_sync,
+    SUM(CASE WHEN sc.error_message IS NOT NULL THEN 1 ELSE 0 END) as error_count
+FROM sync_checkpoints sc
+JOIN matrices m ON sc.matrix_id = m.id
+GROUP BY sc.matrix_id, m.ins_code, sc.county_code, sc.year, sc.classification_mode;
+
+-- Checkpoint status with lease info view
+CREATE OR REPLACE VIEW sync_checkpoint_status AS
+SELECT
+    sc.id,
+    sc.matrix_id,
+    m.ins_code as matrix_code,
+    sc.chunk_hash,
+    sc.county_code,
+    sc.year,
+    sc.classification_mode,
+    sc.row_count,
+    sc.last_synced_at,
+    sc.error_message,
+    sc.locked_until,
+    sc.locked_by,
+    CASE
+        WHEN sc.error_message IS NOT NULL THEN 'FAILED'
+        WHEN sc.locked_until > NOW() THEN 'RUNNING'
+        WHEN sc.locked_until IS NOT NULL AND sc.locked_until <= NOW() THEN 'EXPIRED'
+        WHEN sc.last_synced_at IS NOT NULL THEN 'COMPLETED'
+        ELSE 'AVAILABLE'
+    END as status
+FROM sync_checkpoints sc
+JOIN matrices m ON sc.matrix_id = m.id;
+
+-- Sync jobs with lease status view
+CREATE OR REPLACE VIEW sync_jobs_lease_status AS
+SELECT
+    sj.id,
+    sj.matrix_id,
+    m.ins_code as matrix_code,
+    sj.year_from,
+    sj.year_to,
+    sj.priority,
+    sj.flags,
+    sj.created_at,
+    sj.started_at,
+    sj.completed_at,
+    sj.rows_inserted,
+    sj.rows_updated,
+    sj.error_message,
+    sj.locked_until,
+    sj.locked_by,
+    CASE
+        WHEN sj.error_message IS NOT NULL AND sj.completed_at IS NULL THEN 'FAILED'
+        WHEN sj.completed_at IS NOT NULL THEN 'COMPLETED'
+        WHEN sj.locked_until > NOW() THEN 'RUNNING'
+        WHEN sj.locked_until IS NOT NULL AND sj.locked_until <= NOW() THEN 'EXPIRED'
+        ELSE 'PENDING'
+    END as status
+FROM sync_jobs sj
+JOIN matrices m ON sj.matrix_id = m.id;
 
 -- ============================================================================
 -- DISCOVERY & ANALYTICS TABLES
@@ -784,7 +909,7 @@ SELECT
     s.matrix_id,
     t.id AS territory_id,
     t.code AS territory_code,
-    t.names->>'ro' AS territory_name,
+    t.name AS territory_name,
     tp.year,
     COUNT(*) AS data_point_count,
     SUM(s.value) AS total_value,
@@ -793,7 +918,7 @@ FROM statistics s
 JOIN time_periods tp ON s.time_period_id = tp.id
 JOIN territories t ON s.territory_id = t.id
 WHERE t.level = 'NUTS2' AND tp.periodicity = 'ANNUAL'
-GROUP BY s.matrix_id, t.id, t.code, t.names->>'ro', tp.year;
+GROUP BY s.matrix_id, t.id, t.code, t.name, tp.year;
 
 CREATE UNIQUE INDEX idx_mv_annual_nuts2_totals_pk ON mv_annual_nuts2_totals(matrix_id, territory_id, year);
 

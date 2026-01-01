@@ -24,6 +24,15 @@ pnpm cli sync all
 
 ---
 
+## Sync Defaults & Resumability
+
+- `sync data` defaults to years 2020-current when `--years` is omitted.
+- `--classifications totals` is the default; use `--classifications all` for full breakdowns.
+- Chunking is adaptive and capped at 30,000 cells per request.
+- Chunk checkpoints are recorded so reruns resume automatically. Use `--force` to re-sync or `--no-resume` to ignore checkpoints.
+
+---
+
 ## Phase 1: Priority Matrices (Limited Set)
 
 Sync only the most important datasets to validate the pipeline and get initial size estimates.
@@ -57,20 +66,20 @@ Sync only the most important datasets to validate the pipeline and get initial s
 
 ```bash
 # Population datasets
-pnpm cli sync data POP107D --years 2020-2024   # Population by localities (UAT level)
-pnpm cli sync data POP108D --years 2020-2024   # Mid-year population by localities
+pnpm cli sync data --matrix POP107D --years 2020-2024   # Population by localities (UAT level)
+pnpm cli sync data --matrix POP108D --years 2020-2024   # Mid-year population by localities
 
 # Employment & Salary (for income tax estimation)
-pnpm cli sync data FOM104D --years 2020-2024   # Employees by localities
-pnpm cli sync data FOM106E --years 2020-2024   # Net salary by counties
-pnpm cli sync data FOM107E --years 2020-2024   # Gross salary by counties
+pnpm cli sync data --matrix FOM104D --years 2020-2024   # Employees by localities
+pnpm cli sync data --matrix FOM106E --years 2020-2024   # Net salary by counties
+pnpm cli sync data --matrix FOM107E --years 2020-2024   # Gross salary by counties
 
 # Enterprises (for profit tax estimation)
-pnpm cli sync data INT101O --years 2020-2024   # Active enterprises by counties
-pnpm cli sync data INT104D --years 2020-2024   # Turnover by counties
+pnpm cli sync data --matrix INT101O --years 2020-2024   # Active enterprises by counties
+pnpm cli sync data --matrix INT104D --years 2020-2024   # Turnover by counties
 
 # Vehicles (for fuel excise estimation)
-pnpm cli sync data TRN103B --years 2020-2024   # Registered vehicles by counties
+pnpm cli sync data --matrix TRN103B --years 2020-2024   # Registered vehicles by counties
 ```
 
 #### UAT-Level Data (Locality Granularity)
@@ -79,13 +88,13 @@ pnpm cli sync data TRN103B --years 2020-2024   # Registered vehicles by counties
 
 1. **Simple sync** (national totals only - default):
    ```bash
-   pnpm cli sync data POP107D --years 2020-2024
+   pnpm cli sync data --matrix POP107D --years 2020-2024
    ```
    Returns: ~5 rows (one per year, national total)
 
 2. **Single county sync** (recommended for testing):
    ```bash
-   pnpm cli sync data POP107D --years 2020-2024 --county AB
+   pnpm cli sync data --matrix POP107D --years 2020-2024 --county AB
    ```
    Returns: ~76 rows for Alba county's localities per year
 
@@ -160,7 +169,7 @@ Sync all matrices but only for a limited year range (e.g., 2020-2024).
 
 ```bash
 # Option A: Using CLI bulk command
-pnpm cli sync data-all --years 2020-2024 --continue-on-error
+pnpm cli sync data --years 2020-2024 --continue-on-error
 
 # Option B: Using the bash script
 ./scripts/sync-all-data.sh 2020-2024
@@ -244,10 +253,10 @@ Expand the year range to include all available historical data.
 ```bash
 # Refresh all previously synced matrices with full year range
 # Note: Only refreshes matrices that already have data
-pnpm cli sync data-refresh --years 1990-2024
+pnpm cli sync data --refresh --years 1990-2024
 
 # Or sync everything from scratch
-pnpm cli sync data-all --years 1990-2024 --continue-on-error
+pnpm cli sync data --years 1990-2024 --continue-on-error
 ```
 
 **Estimated time:** 5-7 days
@@ -432,10 +441,10 @@ curl -s "http://statistici.insse.ro:8077/tempo-ins/context" | head -100
 ### Retry Failed Matrices
 ```bash
 # Retry specific matrix
-pnpm cli sync data <MATRIX_CODE> --years 2020-2024
+pnpm cli sync data --matrix <MATRIX_CODE> --years 2020-2024
 
-# Retry all failed (via data-refresh which skips PENDING)
-pnpm cli sync data-refresh --years 2020-2024
+# Retry all failed (via --refresh which skips PENDING)
+pnpm cli sync data --refresh --years 2020-2024
 ```
 
 ### Reset a Matrix Sync Status

@@ -529,7 +529,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "matrix_nom_items.parent_nom_item_id",
           "territories.id as territory_id",
           "territories.code as territory_code",
-          "territories.names as territory_names",
+          "territories.name as territory_name",
           "territories.path as territory_path",
           "time_periods.id as time_period_id",
           "time_periods.year as time_period_year",
@@ -564,16 +564,11 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           let reference = null;
 
           if (opt.territory_id) {
-            const names = opt.territory_names;
             reference = {
               type: "TERRITORY" as const,
               id: opt.territory_id,
               code: opt.territory_code ?? undefined,
-              name: names
-                ? locale === "en" && names.en
-                  ? names.en
-                  : names.ro
-                : undefined,
+              name: opt.territory_name ?? undefined,
               path: opt.territory_path ?? undefined,
             };
           } else if (opt.time_period_id) {
@@ -756,7 +751,7 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
           "matrix_nom_items.parent_nom_item_id",
           "territories.id as territory_id",
           "territories.code as territory_code",
-          "territories.names as territory_names",
+          "territories.name as territory_name",
           "territories.path as territory_path",
           "time_periods.id as time_period_id",
           "time_periods.year as time_period_year",
@@ -778,16 +773,11 @@ export function registerMatrixRoutes(app: FastifyInstance): void {
         let reference = null;
 
         if (opt.territory_id) {
-          const names = opt.territory_names;
           reference = {
             type: "TERRITORY" as const,
             id: opt.territory_id,
             code: opt.territory_code ?? undefined,
-            name: names
-              ? locale === "en" && names.en
-                ? names.en
-                : names.ro
-              : undefined,
+            name: opt.territory_name ?? undefined,
             path: opt.territory_path ?? undefined,
           };
         } else if (opt.time_period_id) {

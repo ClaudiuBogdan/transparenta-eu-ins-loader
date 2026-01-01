@@ -2,10 +2,11 @@ import { sql } from "kysely";
 import ora from "ora";
 
 import { db, closeConnection } from "../../db/connection.js";
-import { SYNC_DEFAULTS } from "../../db/types.js";
 import { DataSyncService } from "../../services/sync/data.js";
 import { SyncOrchestrator } from "../../services/sync/index.js";
+import { SyncQueueService } from "../../services/sync/queue.js";
 
+import type { SyncTaskStatus } from "../../db/types.js";
 import type { Command } from "commander";
 
 // ============================================================================
@@ -1044,17 +1045,21 @@ TROUBLESHOOTING
       }
     });
 
-  // sync worker - process queued sync jobs
+  // sync worker - process queued sync tasks
   sync
     .command("worker")
     .description(
-      "Process queued sync jobs (runs continuously until queue is empty)"
+      "Process queued sync tasks (runs continuously until queue is empty)"
     )
-    .option("--once", "Process one job and exit")
-    .option("--limit <n>", "Maximum number of jobs to process", Number.parseInt)
+    .option("--once", "Process one task and exit")
+    .option(
+      "--limit <n>",
+      "Maximum number of tasks to process",
+      Number.parseInt
+    )
     .option(
       "--poll-interval <ms>",
-      "Interval to poll for new jobs (default: 5000ms)",
+      "Interval to poll for new tasks (default: 5000ms)",
       Number.parseInt
     )
     .action(
@@ -1076,49 +1081,35 @@ TROUBLESHOOTING
         process.on("SIGTERM", shutdown);
 
         console.log("\n" + "═".repeat(80));
-        console.log("SYNC JOB WORKER");
+        console.log("SYNC TASK WORKER");
         console.log("═".repeat(80));
         console.log(
-          `  Mode:          ${options.once === true ? "Single job" : "Continuous"}`
+          `  Mode:          ${options.once === true ? "Single task" : "Continuous"}`
         );
         if (options.limit !== undefined) {
-          console.log(`  Limit:         ${String(options.limit)} jobs`);
+          console.log(`  Limit:         ${String(options.limit)} tasks`);
         }
         console.log(`  Poll interval: ${String(pollInterval)}ms`);
         console.log("═".repeat(80) + "\n");
 
+        const queueService = new SyncQueueService(db);
         const dataService = new DataSyncService(db);
 
         while (running) {
           // Check limit
           if (options.limit !== undefined && processedCount >= options.limit) {
             console.log(
-              `\nReached job limit (${String(options.limit)}). Stopping.`
+              `\nReached task limit (${String(options.limit)}). Stopping.`
             );
             break;
           }
 
-          // Get next pending job (highest priority, oldest first)
-          const job = await db
-            .selectFrom("sync_jobs")
-            .innerJoin("matrices", "sync_jobs.matrix_id", "matrices.id")
-            .select([
-              "sync_jobs.id",
-              "sync_jobs.matrix_id",
-              "sync_jobs.year_from",
-              "sync_jobs.year_to",
-              "sync_jobs.flags",
-              "matrices.ins_code",
-              "matrices.metadata",
-            ])
-            .where("sync_jobs.status", "=", "PENDING")
-            .orderBy("sync_jobs.priority", "desc")
-            .orderBy("sync_jobs.created_at", "asc")
-            .executeTakeFirst();
+          // Claim next task (highest priority, oldest first)
+          const task = await queueService.claimTask();
 
-          if (!job) {
+          if (!task) {
             if (options.once === true) {
-              console.log("No pending jobs in queue.");
+              console.log("No pending tasks in queue.");
               break;
             }
             // Wait and poll again
@@ -1126,111 +1117,85 @@ TROUBLESHOOTING
             continue;
           }
 
+          // Get matrix info
+          const matrix = await db
+            .selectFrom("matrices")
+            .select(["ins_code", "metadata"])
+            .where("id", "=", task.matrix_id)
+            .executeTakeFirst();
+
+          const matrixCode =
+            matrix?.ins_code ?? `matrix_${String(task.matrix_id)}`;
           const matrixName =
-            (job.metadata as { names?: { ro?: string } })?.names?.ro ??
-            job.ins_code;
+            (matrix?.metadata as { names?: { ro?: string } })?.names?.ro ??
+            matrixCode;
           const displayName =
             matrixName.length > 50
               ? matrixName.slice(0, 47) + "..."
               : matrixName;
 
-          const yearRange = `${String(job.year_from ?? "all")}-${String(job.year_to ?? "all")}`;
-          const flagsSummary =
-            Object.entries(job.flags ?? {})
-              .filter(([, v]) => v === true)
-              .map(([k]) => k)
-              .join(", ") || "defaults";
+          const yearRange = `${String(task.year_from)}-${String(task.year_to)}`;
+          const modeInfo =
+            task.classification_mode === "all"
+              ? "all classifications"
+              : "totals only";
 
           console.log(
             `\n─────────────────────────────────────────────────────────────────────`
           );
           console.log(
-            `Job #${String(job.id)}: ${job.ins_code} - ${displayName}`
+            `Task #${String(task.id)}: ${matrixCode} - ${displayName}`
           );
-          console.log(`  Years: ${yearRange} | Flags: ${flagsSummary}`);
+          console.log(`  Years: ${yearRange} | Mode: ${modeInfo}`);
           console.log(
             `─────────────────────────────────────────────────────────────────────`
           );
 
-          // Mark job as running
-          await db
-            .updateTable("sync_jobs")
-            .set({
-              status: "RUNNING",
-              started_at: new Date(),
-            })
-            .where("id", "=", job.id)
-            .execute();
-
-          const spinner = ora(`Syncing ${job.ins_code}...`).start();
+          const spinner = ora(`Syncing ${matrixCode}...`).start();
 
           try {
-            const flags = job.flags ?? {};
-            const yearFrom = job.year_from ?? SYNC_DEFAULTS.yearFrom;
-            const yearTo = job.year_to ?? SYNC_DEFAULTS.yearTo;
-            const classificationMode =
-              flags.includeAllClassifications === true ||
-              flags.fullSync === true
-                ? "all"
-                : "totals-only";
-            const resume = flags.resume !== false;
-            const force = flags.force === true;
-
             const result = await dataService.syncMatrixFull({
-              matrixCode: job.ins_code,
-              yearFrom,
-              yearTo,
-              classificationMode,
-              cellLimit: flags.chunkSize,
-              resume,
-              force,
+              matrixCode,
+              yearFrom: task.year_from,
+              yearTo: task.year_to,
+              classificationMode: task.classification_mode as
+                | "totals-only"
+                | "all",
+              countyCode: task.county_code ?? undefined,
+              resume: true,
+              force: false,
+              taskId: task.id, // Link checkpoints to this task
               onProgress: (p) => {
                 if (p.phase === "planning") {
-                  spinner.text = `${job.ins_code}: planning chunks`;
+                  spinner.text = `${matrixCode}: planning chunks`;
                 } else if (p.phase === "syncing") {
-                  spinner.text = `${job.ins_code}: ${p.currentChunk ?? ""} [${String(p.chunksCompleted)}/${String(p.chunksTotal)}]`;
+                  spinner.text = `${matrixCode}: ${p.currentChunk ?? ""} [${String(p.chunksCompleted)}/${String(p.chunksTotal)}]`;
                 } else {
-                  spinner.text = `${job.ins_code}: updating coverage`;
+                  spinner.text = `${matrixCode}: finalizing`;
                 }
               },
             });
 
-            // Mark job as completed
-            await db
-              .updateTable("sync_jobs")
-              .set({
-                status: "COMPLETED",
-                completed_at: new Date(),
-                rows_inserted: result.rowsInserted,
-                rows_updated: result.rowsUpdated,
-                error_message:
-                  result.errors.length > 0
-                    ? result.errors.slice(0, 5).join("; ")
-                    : null,
-              })
-              .where("id", "=", job.id)
-              .execute();
+            // Mark task as completed
+            await queueService.updateTaskProgress(task.id, {
+              rowsInserted: result.rowsInserted,
+              rowsUpdated: result.rowsUpdated,
+              chunksTotal: result.chunksTotal,
+            });
+            await queueService.completeTask(task.id);
 
             spinner.succeed(
-              `Job #${String(job.id)} completed: +${String(result.rowsInserted)} inserted, ${String(result.rowsUpdated)} updated`
+              `Task #${String(task.id)} completed: +${String(result.rowsInserted)} inserted, ${String(result.rowsUpdated)} updated`
             );
             processedCount++;
           } catch (error) {
             const errorMsg =
               error instanceof Error ? error.message : String(error);
 
-            // Mark job as failed
-            await db
-              .updateTable("sync_jobs")
-              .set({
-                status: "FAILED",
-                completed_at: new Date(),
-                error_message: errorMsg.slice(0, 1000),
-              })
-              .where("id", "=", job.id)
-              .execute();
+            // Mark task as failed
+            await queueService.failTask(task.id, errorMsg);
 
-            spinner.fail(`Job #${String(job.id)} failed: ${errorMsg}`);
+            spinner.fail(`Task #${String(task.id)} failed: ${errorMsg}`);
             processedCount++;
           }
 
@@ -1243,24 +1208,24 @@ TROUBLESHOOTING
         console.log("\n" + "═".repeat(80));
         console.log("WORKER STOPPED");
         console.log("═".repeat(80));
-        console.log(`  Jobs processed: ${String(processedCount)}`);
+        console.log(`  Tasks processed: ${String(processedCount)}`);
         console.log("═".repeat(80));
 
         await closeConnection();
       }
     );
 
-  // sync jobs - list queued jobs
+  // sync tasks - list queued tasks
   sync
-    .command("jobs")
-    .description("List sync jobs in the queue")
+    .command("tasks")
+    .description("List sync tasks in the queue")
     .option(
       "--status <status>",
-      "Filter by status (PENDING, RUNNING, COMPLETED, FAILED, CANCELLED)"
+      "Filter by status (PENDING, PLANNING, RUNNING, COMPLETED, FAILED, CANCELLED)"
     )
     .option(
       "--limit <n>",
-      "Number of jobs to show (default: 20)",
+      "Number of tasks to show (default: 20)",
       Number.parseInt
     )
     .action(async (options: { status?: string; limit?: number }) => {
@@ -1268,27 +1233,31 @@ TROUBLESHOOTING
         const limit = options.limit ?? 20;
 
         let query = db
-          .selectFrom("sync_jobs")
-          .innerJoin("matrices", "sync_jobs.matrix_id", "matrices.id")
+          .selectFrom("sync_tasks")
+          .innerJoin("matrices", "sync_tasks.matrix_id", "matrices.id")
           .select([
-            "sync_jobs.id",
-            "sync_jobs.status",
-            "sync_jobs.priority",
-            "sync_jobs.created_at",
-            "sync_jobs.started_at",
-            "sync_jobs.completed_at",
-            "sync_jobs.rows_inserted",
-            "sync_jobs.rows_updated",
-            "sync_jobs.error_message",
+            "sync_tasks.id",
+            "sync_tasks.status",
+            "sync_tasks.priority",
+            "sync_tasks.created_at",
+            "sync_tasks.started_at",
+            "sync_tasks.completed_at",
+            "sync_tasks.rows_inserted",
+            "sync_tasks.rows_updated",
+            "sync_tasks.chunks_total",
+            "sync_tasks.chunks_completed",
+            "sync_tasks.chunks_failed",
+            "sync_tasks.error_message",
             "matrices.ins_code",
             "matrices.metadata",
           ])
-          .orderBy("sync_jobs.created_at", "desc")
+          .orderBy("sync_tasks.created_at", "desc")
           .limit(limit);
 
         if (options.status !== undefined) {
           const validStatuses = [
             "PENDING",
+            "PLANNING",
             "RUNNING",
             "COMPLETED",
             "FAILED",
@@ -1302,29 +1271,24 @@ TROUBLESHOOTING
             return;
           }
           query = query.where(
-            "sync_jobs.status",
+            "sync_tasks.status",
             "=",
-            options.status.toUpperCase() as
-              | "PENDING"
-              | "RUNNING"
-              | "COMPLETED"
-              | "FAILED"
-              | "CANCELLED"
+            options.status.toUpperCase() as SyncTaskStatus
           );
         }
 
-        const jobs = await query.execute();
+        const tasks = await query.execute();
 
         // Get queue summary
         const queueSummary = await db
-          .selectFrom("sync_jobs")
+          .selectFrom("sync_tasks")
           .select(["status", sql<number>`COUNT(*)::int`.as("count")])
           .groupBy("status")
           .execute();
 
-        console.log("\n" + "═".repeat(100));
-        console.log("SYNC JOB QUEUE");
-        console.log("═".repeat(100));
+        console.log("\n" + "═".repeat(110));
+        console.log("SYNC TASK QUEUE");
+        console.log("═".repeat(110));
 
         // Print summary
         const counts: Record<string, number> = {};
@@ -1333,15 +1297,16 @@ TROUBLESHOOTING
         }
         console.log(
           `  PENDING: ${String(counts.PENDING ?? 0).padEnd(5)} | ` +
+            `PLANNING: ${String(counts.PLANNING ?? 0).padEnd(5)} | ` +
             `RUNNING: ${String(counts.RUNNING ?? 0).padEnd(5)} | ` +
             `COMPLETED: ${String(counts.COMPLETED ?? 0).padEnd(5)} | ` +
             `FAILED: ${String(counts.FAILED ?? 0).padEnd(5)} | ` +
             `CANCELLED: ${String(counts.CANCELLED ?? 0)}`
         );
-        console.log("═".repeat(100));
+        console.log("═".repeat(110));
 
-        if (jobs.length === 0) {
-          console.log("\nNo jobs found matching criteria.");
+        if (tasks.length === 0) {
+          console.log("\nNo tasks found matching criteria.");
         } else {
           console.log(
             "\n" +
@@ -1349,46 +1314,53 @@ TROUBLESHOOTING
               "Status".padEnd(12) +
               "Matrix".padEnd(12) +
               "Priority".padEnd(10) +
-              "Created".padEnd(12) +
-              "Rows".padEnd(12) +
+              "Progress".padEnd(14) +
+              "Rows".padEnd(14) +
               "Name"
           );
-          console.log("─".repeat(100));
+          console.log("─".repeat(110));
 
-          for (const job of jobs) {
+          for (const task of tasks) {
             const name =
-              (job.metadata as { names?: { ro?: string } })?.names?.ro ??
-              job.ins_code;
+              (task.metadata as { names?: { ro?: string } })?.names?.ro ??
+              task.ins_code;
             const displayName =
               name.length > 30 ? name.slice(0, 27) + "..." : name;
-            const created = job.created_at.toISOString().split("T")[0] ?? "";
+            const progress =
+              task.chunks_total && task.chunks_total > 0
+                ? `${String(task.chunks_completed)}/${String(task.chunks_total)}`
+                : "-";
             const rows =
-              job.status === "COMPLETED"
-                ? `+${String(job.rows_inserted)}/${String(job.rows_updated)}`
+              task.status === "COMPLETED" || task.status === "RUNNING"
+                ? `+${String(task.rows_inserted)}/${String(task.rows_updated)}`
                 : "-";
 
             console.log(
-              String(job.id).padEnd(8) +
-                job.status.padEnd(12) +
-                job.ins_code.padEnd(12) +
-                String(job.priority).padEnd(10) +
-                created.padEnd(12) +
-                rows.padEnd(12) +
+              String(task.id).padEnd(8) +
+                task.status.padEnd(12) +
+                task.ins_code.padEnd(12) +
+                String(task.priority).padEnd(10) +
+                progress.padEnd(14) +
+                rows.padEnd(14) +
                 displayName
             );
           }
 
-          if (jobs.length === limit) {
+          if (tasks.length === limit) {
             console.log(`\n... (showing first ${String(limit)} results)`);
           }
         }
 
-        // Show worker hint if there are pending jobs
-        if ((counts.PENDING ?? 0) > 0 || (counts.RUNNING ?? 0) > 0) {
-          console.log("\n" + "─".repeat(100));
-          console.log("To process queued jobs, run:");
+        // Show worker hint if there are pending tasks
+        if (
+          (counts.PENDING ?? 0) > 0 ||
+          (counts.PLANNING ?? 0) > 0 ||
+          (counts.RUNNING ?? 0) > 0
+        ) {
+          console.log("\n" + "─".repeat(110));
+          console.log("To process queued tasks, run:");
           console.log("  pnpm cli sync worker");
-          console.log("─".repeat(100));
+          console.log("─".repeat(110));
         }
       } catch (error) {
         console.error(`Error: ${(error as Error).message}`);
@@ -1398,173 +1370,241 @@ TROUBLESHOOTING
       }
     });
 
-  // sync coverage [matrix] - show sync coverage statistics
+  // sync retry - retry failed tasks
   sync
-    .command("coverage [matrix]")
-    .description("Show sync coverage statistics for a matrix or all matrices")
-    .option("--incomplete", "Show only matrices with <100% coverage")
+    .command("retry")
+    .description("Retry failed sync tasks")
+    .option("--task <id>", "Retry specific task by ID", Number.parseInt)
+    .option("--all", "Retry all failed tasks")
+    .action(async (options: { task?: number; all?: boolean }) => {
+      try {
+        const queueService = new SyncQueueService(db);
+
+        if (options.task !== undefined) {
+          // Retry specific task
+          const success = await queueService.retryTask(options.task);
+          if (success) {
+            console.log(`Task #${String(options.task)} reset for retry.`);
+            console.log("Run 'pnpm cli sync worker' to process the queue.");
+          } else {
+            console.log(
+              `Task #${String(options.task)} not found or not in FAILED status.`
+            );
+            process.exitCode = 1;
+          }
+        } else if (options.all === true) {
+          // Retry all failed tasks
+          const count = await queueService.retryAllFailedTasks();
+          if (count > 0) {
+            console.log(`${String(count)} failed tasks reset for retry.`);
+            console.log("Run 'pnpm cli sync worker' to process the queue.");
+          } else {
+            console.log("No failed tasks to retry.");
+          }
+        } else {
+          console.log("Specify --task <id> or --all to retry failed tasks.");
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        console.error(`Error: ${(error as Error).message}`);
+        process.exitCode = 1;
+      } finally {
+        await closeConnection();
+      }
+    });
+
+  // sync history [matrix] - show sync task history
+  sync
+    .command("history [matrix]")
+    .description("Show sync task history for a matrix or all matrices")
+    .option("--failed", "Show only failed tasks")
+    .option(
+      "--limit <n>",
+      "Number of tasks to show (default: 20)",
+      Number.parseInt
+    )
     .action(
       async (
         matrixCode: string | undefined,
-        options: { incomplete?: boolean }
+        options: { failed?: boolean; limit?: number }
       ) => {
         try {
+          const limit = options.limit ?? 20;
+
           if (matrixCode) {
-            // Show coverage for specific matrix
-            const coverage = await db
-              .selectFrom("sync_coverage")
-              .innerJoin("matrices", "sync_coverage.matrix_id", "matrices.id")
-              .select([
-                "matrices.ins_code",
-                "matrices.metadata",
-                "sync_coverage.total_territories",
-                "sync_coverage.synced_territories",
-                "sync_coverage.total_years",
-                "sync_coverage.synced_years",
-                "sync_coverage.total_classifications",
-                "sync_coverage.synced_classifications",
-                "sync_coverage.actual_data_points",
-                "sync_coverage.expected_data_points",
-                "sync_coverage.null_value_count",
-                "sync_coverage.missing_value_count",
-                "sync_coverage.first_sync_at",
-                "sync_coverage.last_sync_at",
-              ])
-              .where("matrices.ins_code", "=", matrixCode)
+            // Show task history for specific matrix
+            const matrix = await db
+              .selectFrom("matrices")
+              .select(["id", "ins_code", "metadata"])
+              .where("ins_code", "=", matrixCode.toUpperCase())
               .executeTakeFirst();
 
-            if (!coverage) {
-              console.log(
-                `No coverage data for ${matrixCode}. Run sync first.`
-              );
+            if (!matrix) {
+              console.log(`Matrix ${matrixCode} not found.`);
+              process.exitCode = 1;
               return;
             }
+
+            let query = db
+              .selectFrom("sync_tasks")
+              .selectAll()
+              .where("matrix_id", "=", matrix.id)
+              .orderBy("created_at", "desc")
+              .limit(limit);
+
+            if (options.failed === true) {
+              query = query.where("status", "=", "FAILED");
+            }
+
+            const tasks = await query.execute();
 
             const matrixName =
-              (coverage.metadata as { names?: { ro?: string } })?.names?.ro ??
+              (matrix.metadata as { names?: { ro?: string } })?.names?.ro ??
               matrixCode;
-            const territoryPct =
-              coverage.total_territories > 0
-                ? (
-                    (coverage.synced_territories / coverage.total_territories) *
-                    100
-                  ).toFixed(1)
-                : "100.0";
-            const yearPct =
-              coverage.total_years > 0
-                ? (
-                    (coverage.synced_years / coverage.total_years) *
-                    100
-                  ).toFixed(1)
-                : "100.0";
-            const overallPct =
-              coverage.expected_data_points && coverage.expected_data_points > 0
-                ? (
-                    ((coverage.actual_data_points ?? 0) /
-                      coverage.expected_data_points) *
-                    100
-                  ).toFixed(1)
-                : "N/A";
 
-            console.log("\n" + "═".repeat(80));
-            console.log(`SYNC COVERAGE: ${matrixCode}`);
-            console.log("═".repeat(80));
-            console.log(`  Matrix:     ${matrixName}`);
-            console.log(
-              `  Last Sync:  ${coverage.last_sync_at?.toISOString() ?? "Never"}`
-            );
-            console.log("─".repeat(80));
-            console.log("  COVERAGE SUMMARY");
-            console.log("─".repeat(80));
-            console.log(
-              `  Territories:    ${String(coverage.synced_territories).padStart(6)} / ${String(coverage.total_territories).padStart(6)} (${territoryPct}%)`
-            );
-            console.log(
-              `  Years:          ${String(coverage.synced_years).padStart(6)} / ${String(coverage.total_years).padStart(6)} (${yearPct}%)`
-            );
-            console.log("─".repeat(80));
-            console.log(
-              `  Data Points:    ${String(coverage.actual_data_points ?? 0).padStart(10)} (${overallPct}% of expected)`
-            );
-            console.log(
-              `    - Null values:    ${String(coverage.null_value_count ?? 0)}`
-            );
-            console.log(
-              `    - Missing (:):    ${String(coverage.missing_value_count ?? 0)}`
-            );
-            console.log("═".repeat(80));
-          } else {
-            // Show coverage summary for all matrices
-            let query = db
-              .selectFrom("sync_coverage")
-              .innerJoin("matrices", "sync_coverage.matrix_id", "matrices.id")
-              .select([
-                "matrices.ins_code",
-                "sync_coverage.total_territories",
-                "sync_coverage.synced_territories",
-                "sync_coverage.total_years",
-                "sync_coverage.synced_years",
-                "sync_coverage.actual_data_points",
-                "sync_coverage.last_sync_at",
-              ])
-              .orderBy("sync_coverage.last_sync_at", "desc");
+            console.log("\n" + "═".repeat(100));
+            console.log(`SYNC HISTORY: ${matrixCode}`);
+            console.log("═".repeat(100));
+            console.log(`  Matrix: ${matrixName}`);
+            console.log("─".repeat(100));
 
-            if (options.incomplete === true) {
-              query = query.where(({ eb }) =>
-                eb.or([
-                  eb(
-                    "sync_coverage.synced_territories",
-                    "<",
-                    eb.ref("sync_coverage.total_territories")
-                  ),
-                  eb(
-                    "sync_coverage.synced_years",
-                    "<",
-                    eb.ref("sync_coverage.total_years")
-                  ),
-                ])
+            if (tasks.length === 0) {
+              console.log("\n  No sync tasks found for this matrix.");
+            } else {
+              console.log(
+                "\n" +
+                  "  " +
+                  "ID".padEnd(8) +
+                  "Status".padEnd(12) +
+                  "Years".padEnd(12) +
+                  "Progress".padEnd(14) +
+                  "Rows".padEnd(14) +
+                  "Completed"
               );
+              console.log("  " + "─".repeat(90));
+
+              for (const task of tasks) {
+                const years = `${String(task.year_from)}-${String(task.year_to)}`;
+                const progress =
+                  task.chunks_total && task.chunks_total > 0
+                    ? `${String(task.chunks_completed)}/${String(task.chunks_total)}`
+                    : "-";
+                const rows = `+${String(task.rows_inserted)}/${String(task.rows_updated)}`;
+                const completed = task.completed_at
+                  ? task.completed_at.toISOString().substring(0, 10)
+                  : "-";
+
+                console.log(
+                  "  " +
+                    String(task.id).padEnd(8) +
+                    task.status.padEnd(12) +
+                    years.padEnd(12) +
+                    progress.padEnd(14) +
+                    rows.padEnd(14) +
+                    completed
+                );
+              }
             }
 
-            const coverages = await query.limit(50).execute();
+            // Show failed chunks if any
+            const failedChunks = await db
+              .selectFrom("sync_checkpoints")
+              .select(["chunk_name", "error_message", "retry_count"])
+              .where("matrix_id", "=", matrix.id)
+              .where("status", "in", ["FAILED", "EXHAUSTED"])
+              .orderBy("chunk_index", "asc")
+              .limit(10)
+              .execute();
 
-            if (coverages.length === 0) {
-              console.log("No coverage data found. Run sync first.");
-              return;
+            if (failedChunks.length > 0) {
+              console.log("\n" + "─".repeat(100));
+              console.log("  FAILED CHUNKS:");
+              for (const chunk of failedChunks) {
+                const errorSnippet =
+                  chunk.error_message && chunk.error_message.length > 50
+                    ? chunk.error_message.substring(0, 47) + "..."
+                    : (chunk.error_message ?? "Unknown error");
+                console.log(
+                  `    ${chunk.chunk_name} (retries: ${String(chunk.retry_count)}): ${errorSnippet}`
+                );
+              }
             }
 
             console.log("\n" + "═".repeat(100));
-            console.log("SYNC COVERAGE SUMMARY");
-            console.log("═".repeat(100));
-            console.log(
-              "  " +
-                "Matrix".padEnd(15) +
-                "Territories".padEnd(20) +
-                "Years".padEnd(15) +
-                "Data Points".padEnd(15) +
-                "Last Sync"
-            );
-            console.log("─".repeat(100));
+          } else {
+            // Show summary of recent tasks across all matrices
+            let query = db
+              .selectFrom("sync_tasks")
+              .innerJoin("matrices", "sync_tasks.matrix_id", "matrices.id")
+              .select([
+                "sync_tasks.id",
+                "sync_tasks.status",
+                "sync_tasks.year_from",
+                "sync_tasks.year_to",
+                "sync_tasks.chunks_total",
+                "sync_tasks.chunks_completed",
+                "sync_tasks.chunks_failed",
+                "sync_tasks.rows_inserted",
+                "sync_tasks.rows_updated",
+                "sync_tasks.completed_at",
+                "matrices.ins_code",
+              ])
+              .orderBy("sync_tasks.created_at", "desc")
+              .limit(limit);
 
-            for (const cov of coverages) {
-              const territoryStr = `${String(cov.synced_territories)}/${String(cov.total_territories)}`;
-              const yearStr = `${String(cov.synced_years)}/${String(cov.total_years)}`;
-              const lastSync = cov.last_sync_at
-                ? cov.last_sync_at.toISOString().substring(0, 10)
-                : "Never";
-
-              console.log(
-                "  " +
-                  cov.ins_code.padEnd(15) +
-                  territoryStr.padEnd(20) +
-                  yearStr.padEnd(15) +
-                  String(cov.actual_data_points ?? 0).padEnd(15) +
-                  lastSync
-              );
+            if (options.failed === true) {
+              query = query.where("sync_tasks.status", "=", "FAILED");
             }
 
-            console.log("═".repeat(100));
-            console.log(`  Total: ${String(coverages.length)} matrices`);
+            const tasks = await query.execute();
+
+            console.log("\n" + "═".repeat(110));
+            console.log("SYNC TASK HISTORY");
+            console.log("═".repeat(110));
+
+            if (tasks.length === 0) {
+              console.log("\nNo sync tasks found.");
+            } else {
+              console.log(
+                "\n" +
+                  "ID".padEnd(8) +
+                  "Status".padEnd(12) +
+                  "Matrix".padEnd(12) +
+                  "Years".padEnd(12) +
+                  "Progress".padEnd(14) +
+                  "Rows".padEnd(14) +
+                  "Completed"
+              );
+              console.log("─".repeat(110));
+
+              for (const task of tasks) {
+                const years = `${String(task.year_from)}-${String(task.year_to)}`;
+                const progress =
+                  task.chunks_total && task.chunks_total > 0
+                    ? `${String(task.chunks_completed)}/${String(task.chunks_total)}`
+                    : "-";
+                const rows = `+${String(task.rows_inserted)}/${String(task.rows_updated)}`;
+                const completed = task.completed_at
+                  ? task.completed_at.toISOString().substring(0, 10)
+                  : "-";
+
+                console.log(
+                  String(task.id).padEnd(8) +
+                    task.status.padEnd(12) +
+                    task.ins_code.padEnd(12) +
+                    years.padEnd(12) +
+                    progress.padEnd(14) +
+                    rows.padEnd(14) +
+                    completed
+                );
+              }
+
+              if (tasks.length === limit) {
+                console.log(`\n... (showing first ${String(limit)} results)`);
+              }
+            }
+
+            console.log("\n" + "═".repeat(110));
           }
         } catch (error) {
           console.error(`Error: ${(error as Error).message}`);

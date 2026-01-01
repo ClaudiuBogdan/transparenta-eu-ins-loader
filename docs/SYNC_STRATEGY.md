@@ -183,9 +183,9 @@ pnpm cli sync data --years 2020-2024 --continue-on-error
 # In a separate terminal, check progress periodically
 watch -n 60 'pnpm cli sync status | head -20'
 
-# Or check job queue status
-pnpm cli sync jobs --status PENDING
-pnpm cli sync jobs --status RUNNING
+# Or check task queue status
+pnpm cli sync tasks
+pnpm cli sync tasks --status RUNNING
 ```
 
 ### 2.3 Check Phase 2 Statistics
@@ -321,25 +321,56 @@ LIMIT 20;
 "
 ```
 
-### Sync Status by Matrix
+### Sync Status by Matrix (v_matrix_sync_status view)
+
+The `v_matrix_sync_status` view provides comprehensive sync status per matrix:
 
 ```bash
-PGPASSWORD=ins_tempo psql -h localhost -U ins_tempo -d ins_tempo -c "
--- Matrices with most data
-SELECT
-    m.ins_code,
-    (m.metadata->'names'->>'ro')::text AS name,
-    COUNT(s.id) AS rows,
-    MIN(s.year) AS min_year,
-    MAX(s.year) AS max_year
-FROM matrices m
-LEFT JOIN statistics s ON m.id = s.matrix_id
-GROUP BY m.id, m.ins_code, m.metadata
-HAVING COUNT(s.id) > 0
-ORDER BY COUNT(s.id) DESC
+PGPASSWORD=ins_tempo psql -h jupiter -U ins_tempo -d ins_tempo -c "
+-- All matrices with sync activity or data
+SELECT ins_code,
+       LEFT(name_ro, 40) as name,
+       dimension_count as dims,
+       has_uat_data as uat,
+       available_year_from || '-' || available_year_to as avail_years,
+       task_status,
+       task_year_from || '-' || task_year_to as task_years,
+       task_progress_pct as progress,
+       data_rows,
+       data_year_min || '-' || data_year_max as data_years,
+       overall_status
+FROM v_matrix_sync_status
+WHERE task_id IS NOT NULL OR data_rows > 0
+ORDER BY data_rows DESC
 LIMIT 20;
 "
+
+# Summary by sync status
+PGPASSWORD=ins_tempo psql -h jupiter -U ins_tempo -d ins_tempo -c "
+SELECT overall_status, COUNT(*) as matrices, SUM(data_rows) as total_rows
+FROM v_matrix_sync_status
+GROUP BY overall_status
+ORDER BY matrices DESC;
+"
 ```
+
+**View columns:**
+
+| Column | Description |
+|--------|-------------|
+| `ins_code` | Matrix code (e.g., POP105A) |
+| `name_ro` | Matrix name in Romanian |
+| `dimension_count` | Number of dimensions |
+| `has_uat_data` / `has_county_data` | Data granularity flags |
+| `available_year_from/to` | Year range available in INS |
+| `sync_status` | Matrix table status (SYNCED, FAILED, etc.) |
+| `task_status` | Latest task status (COMPLETED, RUNNING, etc.) |
+| `task_year_from/to` | Year range requested in latest task |
+| `task_progress_pct` | Chunk completion percentage |
+| `data_rows` | Actual rows in statistics table |
+| `data_year_min/max` | Actual year range synced |
+| `data_years_count` | Number of distinct years synced |
+| `overall_status` | Computed: SYNCING, SYNCED, PARTIAL, FAILED, NOT_SYNCED |
 
 ### Estimate Remaining Sync Time
 
@@ -390,8 +421,14 @@ LIMIT 20;
 ### Queue Status (when using API-triggered sync)
 
 ```bash
-# View pending jobs
-pnpm cli sync jobs --status PENDING
+# View pending/running tasks
+pnpm cli sync tasks
+
+# View task history
+pnpm cli sync history
+
+# Retry failed tasks
+pnpm cli sync retry --all
 
 # Via SQL
 PGPASSWORD=ins_tempo psql -h localhost -U ins_tempo -d ins_tempo -c "
@@ -400,7 +437,7 @@ SELECT
     COUNT(*) AS count,
     MIN(created_at) AS oldest,
     MAX(created_at) AS newest
-FROM sync_jobs
+FROM sync_tasks
 GROUP BY status
 ORDER BY
     CASE status
@@ -431,20 +468,27 @@ Based on typical INS data patterns:
 
 ### Sync Stalled
 ```bash
-# Check for running workers
-pnpm cli sync jobs --status RUNNING
+# Check for running tasks
+pnpm cli sync tasks --status RUNNING
+
+# Check task with locked lease
+PGPASSWORD=ins_tempo psql -h localhost -U ins_tempo -d ins_tempo -c "
+SELECT id, status, locked_until, locked_by FROM sync_tasks WHERE status = 'RUNNING';"
 
 # Check INS API availability
 curl -s "http://statistici.insse.ro:8077/tempo-ins/context" | head -100
 ```
 
-### Retry Failed Matrices
+### Retry Failed Tasks
 ```bash
-# Retry specific matrix
-pnpm cli sync data --matrix <MATRIX_CODE> --years 2020-2024
+# Retry all failed tasks
+pnpm cli sync retry --all
 
-# Retry all failed (via --refresh which skips PENDING)
-pnpm cli sync data --refresh --years 2020-2024
+# Retry specific task
+pnpm cli sync retry --task <TASK_ID>
+
+# Retry specific matrix (creates new task)
+pnpm cli sync data --matrix <MATRIX_CODE> --years 2020-2024
 ```
 
 ### Reset a Matrix Sync Status

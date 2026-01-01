@@ -296,98 +296,31 @@ export interface StatisticClassificationsTable {
   classification_value_id: number;
 }
 
-/**
- * sync_checkpoints - Track sync progress per chunk (enhanced for county-year chunking)
- */
-export interface SyncCheckpointsTable {
-  id: Generated<number>;
-  matrix_id: number;
-  chunk_hash: string;
-  chunk_query: string;
-  last_synced_at: Date;
-  row_count: number;
-  // Enhanced fields for county-year chunking
-  county_code: string | null;
-  year: number | null;
-  classification_mode: string | null; // 'all', 'totals-only', or slice range
-  cells_queried: number | null;
-  cells_returned: number | null;
-  error_message: string | null;
-  retry_count: Generated<number>;
-  // Lease-based locking (auto-expiring)
-  locked_until: Date | null; // NULL = available, > NOW() = locked, <= NOW() = expired
-  locked_by: string | null; // Worker ID for debugging
-}
+// ============================================================================
+// SYNC SYSTEM Types
+// ============================================================================
 
 /**
- * sync_coverage - Track sync completeness at matrix level
+ * Sync task status enum (matrix-level work requests)
  */
-export interface SyncCoverageTable {
-  id: Generated<number>;
-  matrix_id: number;
-  // Territory coverage
-  total_territories: number;
-  synced_territories: number;
-  // Year coverage
-  total_years: number;
-  synced_years: number;
-  // Classification coverage
-  total_classifications: number;
-  synced_classifications: number;
-  // Data point counts
-  expected_data_points: number | null;
-  actual_data_points: number;
-  null_value_count: number;
-  missing_value_count: number;
-  // Timestamps
-  first_sync_at: Date | null;
-  last_sync_at: Date | null;
-  last_coverage_update: Generated<Date>;
-}
+export type SyncTaskStatus =
+  | "PENDING" // Waiting to be processed
+  | "PLANNING" // Generating chunks
+  | "RUNNING" // Processing chunks
+  | "COMPLETED" // All chunks done
+  | "FAILED" // Unrecoverable error or max retries exceeded
+  | "CANCELLED"; // Manually cancelled
 
 /**
- * sync_dimension_coverage - Track per-dimension completeness
+ * Sync chunk status enum (individual API calls)
  */
-export interface SyncDimensionCoverageTable {
-  id: Generated<number>;
-  matrix_id: number;
-  dim_index: number;
-  dimension_type: DimensionType;
-  total_values: number;
-  synced_values: number;
-  missing_value_ids: number[];
-  last_updated: Generated<Date>;
-}
-
-/**
- * Sync job status enum
- */
-export type SyncJobStatus =
-  | "PENDING"
-  | "RUNNING"
-  | "COMPLETED"
-  | "FAILED"
-  | "CANCELLED";
-
-/**
- * Sync job flags/options stored as JSONB
- */
-export interface SyncJobFlags {
-  /** Skip rows that already exist (default: false) */
-  skipExisting?: boolean;
-  /** Force re-sync even if data exists (default: false) */
-  force?: boolean;
-  /** Chunk size for large queries (default: auto) */
-  chunkSize?: number;
-  /** Only sync TOTAL classification values (default: true) */
-  totalsOnly?: boolean;
-  /** Include all classification breakdowns (default: false) */
-  includeAllClassifications?: boolean;
-  /** Sync ALL dimensions including all territories and classifications */
-  fullSync?: boolean;
-  /** Resume from last checkpoint */
-  resume?: boolean;
-}
+export type SyncChunkStatus =
+  | "PENDING" // Not yet attempted
+  | "RUNNING" // Currently fetching
+  | "COMPLETED" // Successfully synced
+  | "FAILED" // Failed, will retry
+  | "EXHAUSTED" // Max retries exceeded
+  | "SKIPPED"; // Already up-to-date (resume mode)
 
 /**
  * Default sync configuration
@@ -397,36 +330,123 @@ export const SYNC_DEFAULTS = {
   yearFrom: 2020,
   /** Default end year when not specified (current year) */
   yearTo: new Date().getFullYear(),
-  /** Default sync flags */
-  flags: {
-    skipExisting: false,
-    force: false,
-    totalsOnly: true,
-    includeAllClassifications: false,
-  } satisfies SyncJobFlags,
+  /** Default classification mode */
+  classificationMode: "totals-only" as const,
+  /** Retry configuration */
+  retry: {
+    maxRetries: 3,
+    initialBackoffMs: 2000,
+    maxBackoffMs: 30000,
+    backoffMultiplier: 2,
+  },
+  /** Lease durations */
+  lease: {
+    taskDurationMs: 5 * 60 * 1000, // 5 minutes
+    chunkDurationMs: 2 * 60 * 1000, // 2 minutes
+    apiLockDurationMs: 30 * 1000, // 30 seconds
+  },
+  /** Rate limit */
+  rateLimitMs: 750,
 } as const;
 
 /**
- * sync_jobs - Queue table for data sync jobs
+ * sync_tasks - Queue table for matrix sync requests (replaces sync_jobs)
  */
-export interface SyncJobsTable {
+export interface SyncTasksTable {
   id: Generated<number>;
   matrix_id: number;
-  status: SyncJobStatus;
-  year_from: number | null;
-  year_to: number | null;
+
+  // Request parameters (immutable after creation)
+  year_from: number;
+  year_to: number;
+  classification_mode: string;
+  county_code: string | null;
+
+  // Status
+  status: SyncTaskStatus;
   priority: number;
-  flags: SyncJobFlags;
+
+  // Progress (updated as chunks complete)
+  chunks_total: number | null;
+  chunks_completed: number;
+  chunks_failed: number;
+  rows_inserted: number;
+  rows_updated: number;
+
+  // Timing
   created_at: Generated<Date>;
   started_at: Date | null;
   completed_at: Date | null;
-  rows_inserted: number;
-  rows_updated: number;
+
+  // Error info
   error_message: string | null;
-  created_by: string | null;
-  // Lease-based locking (auto-expiring)
-  locked_until: Date | null; // NULL = available, > NOW() = locked, <= NOW() = expired
-  locked_by: string | null; // Worker ID for debugging
+
+  // Lease-based locking
+  locked_until: Date | null;
+  locked_by: string | null;
+
+  // Tracking
+  created_by: string;
+}
+
+/**
+ * sync_checkpoints - Track chunk-level progress within a task
+ */
+export interface SyncCheckpointsTable {
+  id: Generated<number>;
+  task_id: number | null; // null for direct CLI syncs without a task
+  matrix_id: number;
+
+  // Chunk identification
+  chunk_hash: string;
+  chunk_index: number;
+  chunk_name: string;
+
+  // Chunk parameters
+  county_code: string | null;
+  year_from: number | null;
+  year_to: number | null;
+  cells_estimated: number;
+
+  // Status
+  status: SyncChunkStatus;
+
+  // Results
+  cells_returned: number | null;
+  rows_synced: number | null;
+
+  // Timing
+  created_at: Generated<Date>;
+  started_at: Date | null;
+  completed_at: Date | null;
+
+  // Error handling
+  error_message: string | null;
+  retry_count: number;
+  next_retry_at: Date | null;
+
+  // Lease-based locking
+  locked_until: Date | null;
+  locked_by: string | null;
+}
+
+/**
+ * sync_rate_limiter - Global INS API lock (single row table)
+ */
+export interface SyncRateLimiterTable {
+  id: number; // Always 1
+
+  // Current lock
+  locked_until: Date | null;
+  locked_by: string | null;
+
+  // Rate limit config
+  min_interval_ms: number;
+
+  // Stats
+  last_call_at: Date | null;
+  calls_today: number;
+  stats_reset_at: Date;
 }
 
 // ============================================================================
@@ -562,10 +582,11 @@ export interface Database {
   // Fact tables
   statistics: StatisticsTable;
   statistic_classifications: StatisticClassificationsTable;
+
+  // Sync system
+  sync_tasks: SyncTasksTable;
   sync_checkpoints: SyncCheckpointsTable;
-  sync_jobs: SyncJobsTable;
-  sync_coverage: SyncCoverageTable;
-  sync_dimension_coverage: SyncDimensionCoverageTable;
+  sync_rate_limiter: SyncRateLimiterTable;
 
   // Discovery & Analytics
   matrix_tags: MatrixTagsTable;
@@ -640,26 +661,19 @@ export type StatisticClassification = Selectable<StatisticClassificationsTable>;
 export type NewStatisticClassification =
   Insertable<StatisticClassificationsTable>;
 
+// Sync Tasks
+export type SyncTask = Selectable<SyncTasksTable>;
+export type NewSyncTask = Insertable<SyncTasksTable>;
+export type SyncTaskUpdate = Updateable<SyncTasksTable>;
+
 // Sync Checkpoints
 export type SyncCheckpoint = Selectable<SyncCheckpointsTable>;
 export type NewSyncCheckpoint = Insertable<SyncCheckpointsTable>;
 export type SyncCheckpointUpdate = Updateable<SyncCheckpointsTable>;
 
-// Sync Coverage
-export type SyncCoverage = Selectable<SyncCoverageTable>;
-export type NewSyncCoverage = Insertable<SyncCoverageTable>;
-export type SyncCoverageUpdate = Updateable<SyncCoverageTable>;
-
-// Sync Dimension Coverage
-export type SyncDimensionCoverage = Selectable<SyncDimensionCoverageTable>;
-export type NewSyncDimensionCoverage = Insertable<SyncDimensionCoverageTable>;
-export type SyncDimensionCoverageUpdate =
-  Updateable<SyncDimensionCoverageTable>;
-
-// Sync Jobs
-export type SyncJob = Selectable<SyncJobsTable>;
-export type NewSyncJob = Insertable<SyncJobsTable>;
-export type SyncJobUpdate = Updateable<SyncJobsTable>;
+// Sync Rate Limiter
+export type SyncRateLimiter = Selectable<SyncRateLimiterTable>;
+export type SyncRateLimiterUpdate = Updateable<SyncRateLimiterTable>;
 
 // Matrix Tags
 export type MatrixTag = Selectable<MatrixTagsTable>;

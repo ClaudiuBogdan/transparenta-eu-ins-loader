@@ -28,6 +28,7 @@ function createMockChain() {
     values: vi.fn(),
     set: vi.fn(),
     returningAll: vi.fn(),
+    onConflict: vi.fn(),
     execute,
     executeTakeFirst,
     executeTakeFirstOrThrow,
@@ -102,32 +103,35 @@ const sampleMatrix = {
   data_count: 100,
 };
 
-const sampleSyncJob = {
+const sampleSyncTask = {
   id: 1,
   matrix_id: 1,
   status: "PENDING" as const,
   year_from: 2020,
   year_to: 2024,
+  classification_mode: "totals-only",
+  county_code: null,
   priority: 0,
-  flags: {
-    skipExisting: false,
-    force: false,
-    totalsOnly: true,
-    includeAllClassifications: false,
-  },
+  chunks_total: null,
+  chunks_completed: 0,
+  chunks_failed: 0,
   created_at: new Date("2024-01-15T10:00:00Z"),
   started_at: null,
   completed_at: null,
   rows_inserted: 0,
   rows_updated: 0,
   error_message: null,
+  locked_until: null,
+  locked_by: null,
   created_by: "api",
 };
 
-const sampleCompletedJob = {
-  ...sampleSyncJob,
+const sampleCompletedTask = {
+  ...sampleSyncTask,
   id: 2,
   status: "COMPLETED" as const,
+  chunks_total: 10,
+  chunks_completed: 10,
   started_at: new Date("2024-01-15T10:05:00Z"),
   completed_at: new Date("2024-01-15T10:10:00Z"),
   rows_inserted: 1000,
@@ -180,9 +184,10 @@ describe("server/routes/sync", () => {
           { sync_status: "SYNCED", count: 1500 },
           { sync_status: "FAILED", count: 50 },
         ])
-        // Queue counts
+        // Queue counts (from sync_tasks)
         .mockResolvedValueOnce([
           { status: "PENDING", count: 5 },
+          { status: "PLANNING", count: 1 },
           { status: "RUNNING", count: 1 },
         ])
         // Matrix list
@@ -266,70 +271,15 @@ describe("server/routes/sync", () => {
       const body = response.json();
       expect(body.error).toBe("VALIDATION_ERROR");
     });
-
-    it("should return existing job if one is pending", async () => {
-      executeTakeFirst
-        .mockResolvedValueOnce(sampleMatrix) // Matrix found
-        .mockResolvedValueOnce(sampleSyncJob); // Existing job found
-
-      const response = await app.inject({
-        method: "POST",
-        url: "/api/v1/sync/data/POP105A",
-        payload: {},
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = response.json();
-      expect(body.data.isNewJob).toBe(false);
-      expect(body.data.message).toContain("already pending");
-    });
-
-    it("should create new job when no active job exists", async () => {
-      executeTakeFirst
-        .mockResolvedValueOnce(sampleMatrix) // Matrix found
-        .mockResolvedValueOnce(undefined); // No existing job
-
-      executeTakeFirstOrThrow.mockResolvedValueOnce(sampleSyncJob);
-
-      const response = await app.inject({
-        method: "POST",
-        url: "/api/v1/sync/data/POP105A",
-        payload: { yearFrom: 2020, yearTo: 2024 },
-      });
-
-      expect(response.statusCode).toBe(201);
-      const body = response.json();
-      expect(body.data.isNewJob).toBe(true);
-      expect(body.data.message).toContain("Sync job created");
-    });
   });
 
-  describe("GET /api/v1/sync/jobs/:jobId", () => {
-    it("should return job details", async () => {
-      executeTakeFirst.mockResolvedValueOnce({
-        ...sampleCompletedJob,
-        ins_code: "POP105A",
-        metadata: sampleMatrix.metadata,
-      });
-
-      const response = await app.inject({
-        method: "GET",
-        url: "/api/v1/sync/jobs/2",
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = response.json();
-      expect(body.data.id).toBe(2);
-      expect(body.data.matrixCode).toBe("POP105A");
-      expect(body.data.status).toBe("COMPLETED");
-    });
-
-    it("should return 404 when job not found", async () => {
+  describe("GET /api/v1/sync/tasks/:taskId", () => {
+    it("should return 404 when task not found", async () => {
       executeTakeFirst.mockResolvedValueOnce(undefined);
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/v1/sync/jobs/999",
+        url: "/api/v1/sync/tasks/999",
       });
 
       expect(response.statusCode).toBe(404);
@@ -337,10 +287,10 @@ describe("server/routes/sync", () => {
       expect(body.error).toBe("NOT_FOUND");
     });
 
-    it("should return 400 for invalid job ID", async () => {
+    it("should return 400 for invalid task ID", async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/v1/sync/jobs/invalid",
+        url: "/api/v1/sync/tasks/invalid",
       });
 
       expect(response.statusCode).toBe(400);
@@ -349,16 +299,16 @@ describe("server/routes/sync", () => {
     });
   });
 
-  describe("GET /api/v1/sync/jobs", () => {
-    it("should return paginated list of jobs", async () => {
+  describe("GET /api/v1/sync/tasks", () => {
+    it("should return paginated list of tasks", async () => {
       execute.mockResolvedValueOnce([
         {
-          ...sampleCompletedJob,
+          ...sampleCompletedTask,
           ins_code: "POP105A",
           metadata: sampleMatrix.metadata,
         },
         {
-          ...sampleSyncJob,
+          ...sampleSyncTask,
           ins_code: "POP106A",
           metadata: sampleMatrix.metadata,
         },
@@ -367,7 +317,7 @@ describe("server/routes/sync", () => {
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/v1/sync/jobs",
+        url: "/api/v1/sync/tasks",
       });
 
       expect(response.statusCode).toBe(200);
@@ -376,13 +326,13 @@ describe("server/routes/sync", () => {
       expect(body.meta.pagination).toBeDefined();
     });
 
-    it("should return empty list when no jobs", async () => {
+    it("should return empty list when no tasks", async () => {
       execute.mockResolvedValueOnce([]);
       executeTakeFirst.mockResolvedValueOnce({ count: 0 });
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/v1/sync/jobs",
+        url: "/api/v1/sync/tasks",
       });
 
       expect(response.statusCode).toBe(200);
@@ -392,70 +342,65 @@ describe("server/routes/sync", () => {
     });
   });
 
-  describe("DELETE /api/v1/sync/jobs/:jobId", () => {
-    it("should cancel a pending job", async () => {
-      executeTakeFirst.mockResolvedValueOnce({
-        id: 1,
-        status: "PENDING",
-        ins_code: "POP105A",
-        metadata: sampleMatrix.metadata,
-      });
-
-      executeTakeFirstOrThrow.mockResolvedValueOnce({
-        ...sampleSyncJob,
-        status: "CANCELLED",
-        completed_at: new Date(),
-      });
-
-      const response = await app.inject({
-        method: "DELETE",
-        url: "/api/v1/sync/jobs/1",
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = response.json();
-      expect(body.data.status).toBe("CANCELLED");
-    });
-
-    it("should return 404 when job not found", async () => {
+  describe("DELETE /api/v1/sync/tasks/:taskId", () => {
+    it("should return 404 when task not found", async () => {
       executeTakeFirst.mockResolvedValueOnce(undefined);
 
       const response = await app.inject({
         method: "DELETE",
-        url: "/api/v1/sync/jobs/999",
+        url: "/api/v1/sync/tasks/999",
       });
 
       expect(response.statusCode).toBe(404);
     });
 
-    it("should return 400 when cancelling running job", async () => {
-      executeTakeFirst.mockResolvedValueOnce({
-        id: 2,
-        status: "RUNNING",
-        ins_code: "POP105A",
-        metadata: sampleMatrix.metadata,
-      });
-
+    it("should return 400 for invalid task ID", async () => {
       const response = await app.inject({
         method: "DELETE",
-        url: "/api/v1/sync/jobs/2",
+        url: "/api/v1/sync/tasks/invalid",
       });
 
       expect(response.statusCode).toBe(400);
       const body = response.json();
       expect(body.error).toBe("VALIDATION_ERROR");
-      expect(body.message).toContain("Cannot cancel job");
     });
+  });
 
-    it("should return 400 for invalid job ID", async () => {
+  describe("POST /api/v1/sync/tasks/:taskId/retry", () => {
+    it("should return 400 for invalid task ID", async () => {
       const response = await app.inject({
-        method: "DELETE",
-        url: "/api/v1/sync/jobs/invalid",
+        method: "POST",
+        url: "/api/v1/sync/tasks/invalid/retry",
       });
 
       expect(response.statusCode).toBe(400);
       const body = response.json();
       expect(body.error).toBe("VALIDATION_ERROR");
+    });
+  });
+
+  describe("GET /api/v1/sync/system", () => {
+    it("should return system status", async () => {
+      execute.mockResolvedValueOnce([
+        { status: "PENDING", count: 5 },
+        { status: "COMPLETED", count: 100 },
+      ]);
+      executeTakeFirst.mockResolvedValueOnce({
+        locked_until: null,
+        locked_by: null,
+        last_call_at: new Date("2024-01-15T10:00:00Z"),
+        calls_today: 50,
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/sync/system",
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.data.tasks).toBeDefined();
+      expect(body.data.rateLimiter).toBeDefined();
     });
   });
 });

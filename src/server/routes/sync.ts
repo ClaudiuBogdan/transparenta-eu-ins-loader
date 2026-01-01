@@ -1,8 +1,8 @@
 /**
  * Sync API Routes
  *
- * Queue-based sync endpoints for monitoring sync status and triggering on-demand data sync.
- * Uses database as job queue to prevent INS API rate limiting and duplicate requests.
+ * Task-based sync endpoints for monitoring sync status and triggering on-demand data sync.
+ * Uses database as task queue to prevent INS API rate limiting and duplicate requests.
  */
 
 import { Type, type Static } from "@sinclair/typebox";
@@ -11,9 +11,10 @@ import { sql } from "kysely";
 import { db } from "../../db/connection.js";
 import {
   SYNC_DEFAULTS,
-  type SyncJobFlags,
-  type SyncJobStatus,
+  type SyncTask,
+  type SyncTaskStatus,
 } from "../../db/types.js";
+import { SyncQueueService } from "../../services/sync/queue.js";
 import { NotFoundError, ValidationError } from "../plugins/error-handler.js";
 import { MatrixStatusSchema, PaginationMetaSchema } from "../schemas/common.js";
 
@@ -22,15 +23,15 @@ import type { FastifyInstance } from "fastify";
 // Re-export for use in this file
 const DEFAULT_YEAR_FROM = SYNC_DEFAULTS.yearFrom;
 const DEFAULT_YEAR_TO = SYNC_DEFAULTS.yearTo;
-const DEFAULT_FLAGS: SyncJobFlags = SYNC_DEFAULTS.flags;
 
 // ============================================================================
 // Schemas
 // ============================================================================
 
-// Job status enum schema
-const SyncJobStatusSchema = Type.Union([
+// Task status enum schema
+const SyncTaskStatusSchema = Type.Union([
   Type.Literal("PENDING"),
+  Type.Literal("PLANNING"),
   Type.Literal("RUNNING"),
   Type.Literal("COMPLETED"),
   Type.Literal("FAILED"),
@@ -60,8 +61,9 @@ const SyncSummarySchema = Type.Object({
 
 // Queue summary schema
 const QueueSummarySchema = Type.Object({
-  pendingJobs: Type.Number(),
-  runningJobs: Type.Number(),
+  pendingTasks: Type.Number(),
+  planningTasks: Type.Number(),
+  runningTasks: Type.Number(),
 });
 
 // Matrix sync status item schema
@@ -94,37 +96,35 @@ const SyncDataParamsSchema = Type.Object({
 
 type SyncDataParams = Static<typeof SyncDataParamsSchema>;
 
-// Sync job flags schema
-const SyncJobFlagsSchema = Type.Object({
-  skipExisting: Type.Optional(Type.Boolean()),
-  force: Type.Optional(Type.Boolean()),
-  chunkSize: Type.Optional(Type.Number({ minimum: 100, maximum: 30000 })),
-  totalsOnly: Type.Optional(Type.Boolean()),
-  includeAllClassifications: Type.Optional(Type.Boolean()),
-});
-
 // POST /sync/data/:matrixCode body
 const SyncDataBodySchema = Type.Object({
   yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: 2100 })),
   yearTo: Type.Optional(Type.Number({ minimum: 1900, maximum: 2100 })),
+  classificationMode: Type.Optional(
+    Type.Union([Type.Literal("totals-only"), Type.Literal("all")])
+  ),
+  countyCode: Type.Optional(Type.String()),
   priority: Type.Optional(
     Type.Number({ minimum: -10, maximum: 10, default: 0 })
   ),
-  flags: Type.Optional(SyncJobFlagsSchema),
 });
 
 type SyncDataBody = Static<typeof SyncDataBodySchema>;
 
-// Sync job schema for responses
-const SyncJobSchema = Type.Object({
+// Sync task schema for responses
+const SyncTaskSchema = Type.Object({
   id: Type.Number(),
   matrixCode: Type.String(),
   matrixName: Type.String(),
-  status: SyncJobStatusSchema,
+  status: SyncTaskStatusSchema,
   yearFrom: Type.Number(),
   yearTo: Type.Number(),
+  classificationMode: Type.String(),
+  countyCode: Type.Union([Type.String(), Type.Null()]),
   priority: Type.Number(),
-  flags: SyncJobFlagsSchema,
+  chunksTotal: Type.Union([Type.Number(), Type.Null()]),
+  chunksCompleted: Type.Number(),
+  chunksFailed: Type.Number(),
   createdAt: Type.String({ format: "date-time" }),
   startedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
   completedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
@@ -136,39 +136,47 @@ const SyncJobSchema = Type.Object({
 // POST /sync/data/:matrixCode response
 const SyncTriggerResponseSchema = Type.Object({
   data: Type.Object({
-    job: SyncJobSchema,
-    isNewJob: Type.Boolean(),
+    task: SyncTaskSchema,
+    isNewTask: Type.Boolean(),
     message: Type.String(),
   }),
 });
 
-// GET /sync/jobs/:jobId params
-const JobIdParamsSchema = Type.Object({
-  jobId: Type.String(),
+// GET /sync/tasks/:taskId params
+const TaskIdParamsSchema = Type.Object({
+  taskId: Type.String(),
 });
 
-type JobIdParams = Static<typeof JobIdParamsSchema>;
+type TaskIdParams = Static<typeof TaskIdParamsSchema>;
 
-// GET /sync/jobs/:jobId response
-const SyncJobResponseSchema = Type.Object({
-  data: SyncJobSchema,
+// GET /sync/tasks/:taskId response
+const SyncTaskResponseSchema = Type.Object({
+  data: SyncTaskSchema,
 });
 
-// GET /sync/jobs query params
-const SyncJobsQuerySchema = Type.Object({
-  status: Type.Optional(SyncJobStatusSchema),
+// GET /sync/tasks query params
+const SyncTasksQuerySchema = Type.Object({
+  status: Type.Optional(SyncTaskStatusSchema),
   matrixCode: Type.Optional(Type.String()),
   limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, default: 20 })),
   cursor: Type.Optional(Type.String()),
 });
 
-type SyncJobsQuery = Static<typeof SyncJobsQuerySchema>;
+type SyncTasksQuery = Static<typeof SyncTasksQuerySchema>;
 
-// GET /sync/jobs response
-const SyncJobsListResponseSchema = Type.Object({
-  data: Type.Array(SyncJobSchema),
+// GET /sync/tasks response
+const SyncTasksListResponseSchema = Type.Object({
+  data: Type.Array(SyncTaskSchema),
   meta: Type.Object({
     pagination: PaginationMetaSchema,
+  }),
+});
+
+// POST /sync/tasks/:taskId/retry response
+const TaskRetryResponseSchema = Type.Object({
+  data: Type.Object({
+    success: Type.Boolean(),
+    message: Type.String(),
   }),
 });
 
@@ -176,40 +184,30 @@ const SyncJobsListResponseSchema = Type.Object({
 // Helper Functions
 // ============================================================================
 
-function formatJob(
-  job: {
-    id: number;
-    matrix_id: number;
-    status: SyncJobStatus;
-    year_from: number | null;
-    year_to: number | null;
-    priority: number;
-    flags: SyncJobFlags;
-    created_at: Date;
-    started_at: Date | null;
-    completed_at: Date | null;
-    rows_inserted: number;
-    rows_updated: number;
-    error_message: string | null;
-  },
+function formatTask(
+  task: SyncTask,
   matrixCode: string,
   matrixName: string
-) {
+): Static<typeof SyncTaskSchema> {
   return {
-    id: job.id,
+    id: task.id,
     matrixCode,
     matrixName,
-    status: job.status,
-    yearFrom: job.year_from ?? DEFAULT_YEAR_FROM,
-    yearTo: job.year_to ?? DEFAULT_YEAR_TO,
-    priority: job.priority,
-    flags: job.flags,
-    createdAt: job.created_at.toISOString(),
-    startedAt: job.started_at?.toISOString() ?? null,
-    completedAt: job.completed_at?.toISOString() ?? null,
-    rowsInserted: job.rows_inserted,
-    rowsUpdated: job.rows_updated,
-    errorMessage: job.error_message,
+    status: task.status,
+    yearFrom: task.year_from,
+    yearTo: task.year_to,
+    classificationMode: task.classification_mode,
+    countyCode: task.county_code,
+    priority: task.priority,
+    chunksTotal: task.chunks_total,
+    chunksCompleted: task.chunks_completed,
+    chunksFailed: task.chunks_failed,
+    createdAt: task.created_at.toISOString(),
+    startedAt: task.started_at?.toISOString() ?? null,
+    completedAt: task.completed_at?.toISOString() ?? null,
+    rowsInserted: task.rows_inserted,
+    rowsUpdated: task.rows_updated,
+    errorMessage: task.error_message,
   };
 }
 
@@ -218,6 +216,8 @@ function formatJob(
 // ============================================================================
 
 export function registerSyncRoutes(app: FastifyInstance): void {
+  const queueService = new SyncQueueService(db);
+
   // GET /sync/status - Get sync status summary and matrix list
   app.get<{ Querystring: SyncStatusQuery }>(
     "/sync/status",
@@ -252,21 +252,23 @@ export function registerSyncRoutes(app: FastifyInstance): void {
 
       const withDataCount = withDataResult?.count ?? 0;
 
-      // Get queue status
+      // Get queue status from sync_tasks
       const queueCounts = await db
-        .selectFrom("sync_jobs")
+        .selectFrom("sync_tasks")
         .select(["status", sql<number>`COUNT(*)::int`.as("count")])
-        .where("status", "in", ["PENDING", "RUNNING"])
+        .where("status", "in", ["PENDING", "PLANNING", "RUNNING"])
         .groupBy("status")
         .execute();
 
       const queue = {
-        pendingJobs: 0,
-        runningJobs: 0,
+        pendingTasks: 0,
+        planningTasks: 0,
+        runningTasks: 0,
       };
       for (const row of queueCounts) {
-        if (row.status === "PENDING") queue.pendingJobs = row.count;
-        if (row.status === "RUNNING") queue.runningJobs = row.count;
+        if (row.status === "PENDING") queue.pendingTasks = row.count;
+        if (row.status === "PLANNING") queue.planningTasks = row.count;
+        if (row.status === "RUNNING") queue.runningTasks = row.count;
       }
 
       // Build summary
@@ -383,14 +385,14 @@ export function registerSyncRoutes(app: FastifyInstance): void {
     }
   );
 
-  // POST /sync/data/:matrixCode - Queue data sync job for a specific matrix
+  // POST /sync/data/:matrixCode - Queue data sync task for a specific matrix
   app.post<{ Params: SyncDataParams; Body: SyncDataBody }>(
     "/sync/data/:matrixCode",
     {
       schema: {
-        summary: "Queue data sync job",
+        summary: "Queue data sync task",
         description:
-          "Creates a sync job for a matrix. If a job is already pending or running for this matrix, returns the existing job. Matrix must have metadata synced first.",
+          "Creates a sync task for a matrix. If a task is already pending or running for this matrix, returns the existing task. Matrix must have metadata synced first.",
         tags: ["Sync"],
         params: SyncDataParamsSchema,
         body: SyncDataBodySchema,
@@ -402,17 +404,18 @@ export function registerSyncRoutes(app: FastifyInstance): void {
     },
     async (request, reply) => {
       const { matrixCode } = request.params;
-      const { yearFrom, yearTo, priority = 0, flags } = request.body ?? {};
+      const {
+        yearFrom,
+        yearTo,
+        classificationMode,
+        countyCode,
+        priority = 0,
+      } = request.body ?? {};
 
       // Apply defaults for year range
       const effectiveYearFrom = yearFrom ?? DEFAULT_YEAR_FROM;
       const effectiveYearTo = yearTo ?? DEFAULT_YEAR_TO;
-
-      // Merge flags with defaults
-      const effectiveFlags: SyncJobFlags = {
-        ...DEFAULT_FLAGS,
-        ...flags,
-      };
+      const effectiveMode = classificationMode ?? "totals-only";
 
       // Validate year range
       if (effectiveYearFrom > effectiveYearTo) {
@@ -464,124 +467,88 @@ export function registerSyncRoutes(app: FastifyInstance): void {
         (matrix.metadata as { names?: { ro?: string } })?.names?.ro ??
         matrixCode;
 
-      // Check for existing active job (PENDING or RUNNING)
-      const existingJob = await db
-        .selectFrom("sync_jobs")
-        .selectAll()
-        .where("matrix_id", "=", matrix.id)
-        .where("status", "in", ["PENDING", "RUNNING"])
-        .executeTakeFirst();
+      // Use SyncQueueService to create or get existing task
+      const { task, isNew } = await queueService.createTask({
+        matrixId: matrix.id,
+        yearFrom: effectiveYearFrom,
+        yearTo: effectiveYearTo,
+        classificationMode: effectiveMode,
+        countyCode,
+        priority,
+        createdBy: "api",
+      });
 
-      if (existingJob) {
-        // Return existing job - no duplicate
+      if (isNew) {
+        return reply.status(201).send({
+          data: {
+            task: formatTask(task, matrixCode, matrixName),
+            isNewTask: true,
+            message: `Sync task created for matrix ${matrixCode} (years ${String(effectiveYearFrom)}-${String(effectiveYearTo)}). Task ID: ${String(task.id)}. Run 'pnpm cli sync worker' to process the queue.`,
+          },
+        });
+      } else {
         return reply.status(200).send({
           data: {
-            job: formatJob(existingJob, matrixCode, matrixName),
-            isNewJob: false,
-            message: `Sync job already ${existingJob.status.toLowerCase()} for matrix ${matrixCode}. Job ID: ${String(existingJob.id)}`,
+            task: formatTask(task, matrixCode, matrixName),
+            isNewTask: false,
+            message: `Sync task already ${task.status.toLowerCase()} for matrix ${matrixCode}. Task ID: ${String(task.id)}`,
           },
         });
       }
-
-      // Create new job with defaults applied
-      const newJob = await db
-        .insertInto("sync_jobs")
-        .values({
-          matrix_id: matrix.id,
-          status: "PENDING",
-          year_from: effectiveYearFrom,
-          year_to: effectiveYearTo,
-          priority,
-          flags: effectiveFlags,
-          rows_inserted: 0,
-          rows_updated: 0,
-          created_by: "api",
-        })
-        .returningAll()
-        .executeTakeFirstOrThrow();
-
-      return reply.status(201).send({
-        data: {
-          job: formatJob(newJob, matrixCode, matrixName),
-          isNewJob: true,
-          message: `Sync job created for matrix ${matrixCode} (years ${String(effectiveYearFrom)}-${String(effectiveYearTo)}). Job ID: ${String(newJob.id)}. Run 'pnpm cli sync worker' to process the queue.`,
-        },
-      });
     }
   );
 
-  // GET /sync/jobs/:jobId - Get job status by ID
-  app.get<{ Params: JobIdParams }>(
-    "/sync/jobs/:jobId",
+  // GET /sync/tasks/:taskId - Get task status by ID
+  app.get<{ Params: TaskIdParams }>(
+    "/sync/tasks/:taskId",
     {
       schema: {
-        summary: "Get sync job status",
-        description: "Returns the status and details of a specific sync job",
+        summary: "Get sync task status",
+        description: "Returns the status and details of a specific sync task",
         tags: ["Sync"],
-        params: JobIdParamsSchema,
+        params: TaskIdParamsSchema,
         response: {
-          200: SyncJobResponseSchema,
+          200: SyncTaskResponseSchema,
         },
       },
     },
     async (request, reply) => {
-      const jobId = Number.parseInt(request.params.jobId, 10);
+      const taskId = Number.parseInt(request.params.taskId, 10);
 
-      if (Number.isNaN(jobId)) {
-        throw new ValidationError("Invalid job ID", {
-          jobId: request.params.jobId,
+      if (Number.isNaN(taskId)) {
+        throw new ValidationError("Invalid task ID", {
+          taskId: request.params.taskId,
         });
       }
 
-      const job = await db
-        .selectFrom("sync_jobs")
-        .innerJoin("matrices", "sync_jobs.matrix_id", "matrices.id")
-        .select([
-          "sync_jobs.id",
-          "sync_jobs.matrix_id",
-          "sync_jobs.status",
-          "sync_jobs.year_from",
-          "sync_jobs.year_to",
-          "sync_jobs.priority",
-          "sync_jobs.flags",
-          "sync_jobs.created_at",
-          "sync_jobs.started_at",
-          "sync_jobs.completed_at",
-          "sync_jobs.rows_inserted",
-          "sync_jobs.rows_updated",
-          "sync_jobs.error_message",
-          "matrices.ins_code",
-          "matrices.metadata",
-        ])
-        .where("sync_jobs.id", "=", jobId)
-        .executeTakeFirst();
+      const taskWithProgress = await queueService.getTaskWithProgress(taskId);
 
-      if (!job) {
-        throw new NotFoundError(`Sync job ${String(jobId)} not found`);
+      if (!taskWithProgress) {
+        throw new NotFoundError(`Sync task ${String(taskId)} not found`);
       }
 
-      const matrixName =
-        (job.metadata as { names?: { ro?: string } })?.names?.ro ??
-        job.ins_code;
-
       return reply.send({
-        data: formatJob(job, job.ins_code, matrixName),
+        data: formatTask(
+          taskWithProgress,
+          taskWithProgress.matrixCode,
+          taskWithProgress.matrixName
+        ),
       });
     }
   );
 
-  // GET /sync/jobs - List sync jobs
-  app.get<{ Querystring: SyncJobsQuery }>(
-    "/sync/jobs",
+  // GET /sync/tasks - List sync tasks
+  app.get<{ Querystring: SyncTasksQuery }>(
+    "/sync/tasks",
     {
       schema: {
-        summary: "List sync jobs",
+        summary: "List sync tasks",
         description:
-          "Returns a paginated list of sync jobs with optional filters",
+          "Returns a paginated list of sync tasks with optional filters",
         tags: ["Sync"],
-        querystring: SyncJobsQuerySchema,
+        querystring: SyncTasksQuerySchema,
         response: {
-          200: SyncJobsListResponseSchema,
+          200: SyncTasksListResponseSchema,
         },
       },
     },
@@ -589,41 +556,48 @@ export function registerSyncRoutes(app: FastifyInstance): void {
       const { status, matrixCode, limit = 20, cursor } = request.query;
 
       let query = db
-        .selectFrom("sync_jobs")
-        .innerJoin("matrices", "sync_jobs.matrix_id", "matrices.id")
+        .selectFrom("sync_tasks")
+        .innerJoin("matrices", "sync_tasks.matrix_id", "matrices.id")
         .select([
-          "sync_jobs.id",
-          "sync_jobs.matrix_id",
-          "sync_jobs.status",
-          "sync_jobs.year_from",
-          "sync_jobs.year_to",
-          "sync_jobs.priority",
-          "sync_jobs.flags",
-          "sync_jobs.created_at",
-          "sync_jobs.started_at",
-          "sync_jobs.completed_at",
-          "sync_jobs.rows_inserted",
-          "sync_jobs.rows_updated",
-          "sync_jobs.error_message",
+          "sync_tasks.id",
+          "sync_tasks.matrix_id",
+          "sync_tasks.status",
+          "sync_tasks.year_from",
+          "sync_tasks.year_to",
+          "sync_tasks.classification_mode",
+          "sync_tasks.county_code",
+          "sync_tasks.priority",
+          "sync_tasks.chunks_total",
+          "sync_tasks.chunks_completed",
+          "sync_tasks.chunks_failed",
+          "sync_tasks.created_at",
+          "sync_tasks.started_at",
+          "sync_tasks.completed_at",
+          "sync_tasks.rows_inserted",
+          "sync_tasks.rows_updated",
+          "sync_tasks.error_message",
+          "sync_tasks.locked_until",
+          "sync_tasks.locked_by",
+          "sync_tasks.created_by",
           "matrices.ins_code",
           "matrices.metadata",
         ])
-        .orderBy("sync_jobs.created_at", "desc");
+        .orderBy("sync_tasks.created_at", "desc");
 
       // Apply filters
       if (status !== undefined) {
-        query = query.where("sync_jobs.status", "=", status);
+        query = query.where("sync_tasks.status", "=", status as SyncTaskStatus);
       }
 
       if (matrixCode !== undefined) {
         query = query.where("matrices.ins_code", "=", matrixCode);
       }
 
-      // Apply cursor pagination (cursor is job ID)
+      // Apply cursor pagination (cursor is task ID)
       if (cursor !== undefined) {
         const cursorId = Number.parseInt(cursor, 10);
         if (!Number.isNaN(cursorId)) {
-          query = query.where("sync_jobs.id", "<", cursorId);
+          query = query.where("sync_tasks.id", "<", cursorId);
         }
       }
 
@@ -631,28 +605,52 @@ export function registerSyncRoutes(app: FastifyInstance): void {
       const rows = await query.limit(limit + 1).execute();
 
       const hasMore = rows.length > limit;
-      const jobs = rows.slice(0, limit).map((job) => {
+      const tasks = rows.slice(0, limit).map((row) => {
         const matrixName =
-          (job.metadata as { names?: { ro?: string } })?.names?.ro ??
-          job.ins_code;
-        return formatJob(job, job.ins_code, matrixName);
+          (row.metadata as { names?: { ro?: string } })?.names?.ro ??
+          row.ins_code;
+
+        const task: SyncTask = {
+          id: row.id,
+          matrix_id: row.matrix_id,
+          status: row.status,
+          year_from: row.year_from,
+          year_to: row.year_to,
+          classification_mode: row.classification_mode,
+          county_code: row.county_code,
+          priority: row.priority,
+          chunks_total: row.chunks_total,
+          chunks_completed: row.chunks_completed,
+          chunks_failed: row.chunks_failed,
+          created_at: row.created_at,
+          started_at: row.started_at,
+          completed_at: row.completed_at,
+          rows_inserted: row.rows_inserted,
+          rows_updated: row.rows_updated,
+          error_message: row.error_message,
+          locked_until: row.locked_until,
+          locked_by: row.locked_by,
+          created_by: row.created_by,
+        };
+
+        return formatTask(task, row.ins_code, matrixName);
       });
 
-      const lastJob = jobs[jobs.length - 1];
-      const nextCursor = hasMore && lastJob ? String(lastJob.id) : null;
+      const lastTask = tasks[tasks.length - 1];
+      const nextCursor = hasMore && lastTask ? String(lastTask.id) : null;
 
       // Get total count for this query (without pagination)
       let countQuery = db
-        .selectFrom("sync_jobs")
+        .selectFrom("sync_tasks")
         .select(sql<number>`COUNT(*)::int`.as("count"));
 
       if (status !== undefined) {
-        countQuery = countQuery.where("status", "=", status);
+        countQuery = countQuery.where("status", "=", status as SyncTaskStatus);
       }
 
       if (matrixCode !== undefined) {
         countQuery = countQuery
-          .innerJoin("matrices", "sync_jobs.matrix_id", "matrices.id")
+          .innerJoin("matrices", "sync_tasks.matrix_id", "matrices.id")
           .where("matrices.ins_code", "=", matrixCode);
       }
 
@@ -660,7 +658,7 @@ export function registerSyncRoutes(app: FastifyInstance): void {
       const total = countResult?.count ?? 0;
 
       return reply.send({
-        data: jobs,
+        data: tasks,
         meta: {
           pagination: {
             cursor: nextCursor,
@@ -673,71 +671,161 @@ export function registerSyncRoutes(app: FastifyInstance): void {
     }
   );
 
-  // DELETE /sync/jobs/:jobId - Cancel a pending job
-  app.delete<{ Params: JobIdParams }>(
-    "/sync/jobs/:jobId",
+  // DELETE /sync/tasks/:taskId - Cancel a pending task
+  app.delete<{ Params: TaskIdParams }>(
+    "/sync/tasks/:taskId",
     {
       schema: {
-        summary: "Cancel sync job",
+        summary: "Cancel sync task",
         description:
-          "Cancels a pending sync job. Running jobs cannot be cancelled.",
+          "Cancels a pending or planning sync task. Running tasks will be cancelled when they complete their current chunk.",
         tags: ["Sync"],
-        params: JobIdParamsSchema,
+        params: TaskIdParamsSchema,
         response: {
-          200: SyncJobResponseSchema,
+          200: SyncTaskResponseSchema,
         },
       },
     },
     async (request, reply) => {
-      const jobId = Number.parseInt(request.params.jobId, 10);
+      const taskId = Number.parseInt(request.params.taskId, 10);
 
-      if (Number.isNaN(jobId)) {
-        throw new ValidationError("Invalid job ID", {
-          jobId: request.params.jobId,
+      if (Number.isNaN(taskId)) {
+        throw new ValidationError("Invalid task ID", {
+          taskId: request.params.taskId,
         });
       }
 
-      // Get job with matrix info
-      const job = await db
-        .selectFrom("sync_jobs")
-        .innerJoin("matrices", "sync_jobs.matrix_id", "matrices.id")
-        .select([
-          "sync_jobs.id",
-          "sync_jobs.status",
-          "matrices.ins_code",
-          "matrices.metadata",
-        ])
-        .where("sync_jobs.id", "=", jobId)
-        .executeTakeFirst();
+      // Get task with matrix info
+      const taskWithProgress = await queueService.getTaskWithProgress(taskId);
 
-      if (!job) {
-        throw new NotFoundError(`Sync job ${String(jobId)} not found`);
+      if (!taskWithProgress) {
+        throw new NotFoundError(`Sync task ${String(taskId)} not found`);
       }
 
-      if (job.status !== "PENDING") {
+      if (
+        !["PENDING", "PLANNING", "RUNNING"].includes(taskWithProgress.status)
+      ) {
         throw new ValidationError(
-          `Cannot cancel job with status ${job.status}. Only PENDING jobs can be cancelled.`,
-          { status: job.status }
+          `Cannot cancel task with status ${taskWithProgress.status}. Only PENDING, PLANNING, or RUNNING tasks can be cancelled.`,
+          { status: taskWithProgress.status }
         );
       }
 
-      // Cancel the job
-      const updatedJob = await db
-        .updateTable("sync_jobs")
-        .set({
-          status: "CANCELLED",
-          completed_at: new Date(),
-        })
-        .where("id", "=", jobId)
-        .returningAll()
-        .executeTakeFirstOrThrow();
+      // Cancel the task
+      const cancelled = await queueService.cancelTask(taskId);
 
-      const matrixName =
-        (job.metadata as { names?: { ro?: string } })?.names?.ro ??
-        job.ins_code;
+      if (!cancelled) {
+        throw new ValidationError(
+          `Failed to cancel task ${String(taskId)}. It may have already completed.`,
+          { taskId }
+        );
+      }
+
+      // Get updated task
+      const updatedTask = await queueService.getTaskWithProgress(taskId);
+
+      if (!updatedTask) {
+        throw new NotFoundError(`Sync task ${String(taskId)} not found`);
+      }
 
       return reply.send({
-        data: formatJob(updatedJob, job.ins_code, matrixName),
+        data: formatTask(
+          updatedTask,
+          updatedTask.matrixCode,
+          updatedTask.matrixName
+        ),
+      });
+    }
+  );
+
+  // POST /sync/tasks/:taskId/retry - Retry a failed task
+  app.post<{ Params: TaskIdParams }>(
+    "/sync/tasks/:taskId/retry",
+    {
+      schema: {
+        summary: "Retry failed sync task",
+        description: "Resets a failed sync task to pending status for retry",
+        tags: ["Sync"],
+        params: TaskIdParamsSchema,
+        response: {
+          200: TaskRetryResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const taskId = Number.parseInt(request.params.taskId, 10);
+
+      if (Number.isNaN(taskId)) {
+        throw new ValidationError("Invalid task ID", {
+          taskId: request.params.taskId,
+        });
+      }
+
+      const success = await queueService.retryTask(taskId);
+
+      if (success) {
+        return reply.send({
+          data: {
+            success: true,
+            message: `Task ${String(taskId)} reset for retry. Run 'pnpm cli sync worker' to process the queue.`,
+          },
+        });
+      } else {
+        return reply.send({
+          data: {
+            success: false,
+            message: `Task ${String(taskId)} not found or not in FAILED status.`,
+          },
+        });
+      }
+    }
+  );
+
+  // GET /sync/system - Get sync system status
+  app.get(
+    "/sync/system",
+    {
+      schema: {
+        summary: "Get sync system status",
+        description:
+          "Returns overall sync system status including task counts and rate limiter info",
+        tags: ["Sync"],
+        response: {
+          200: Type.Object({
+            data: Type.Object({
+              tasks: Type.Object({
+                pending: Type.Number(),
+                planning: Type.Number(),
+                running: Type.Number(),
+                completed: Type.Number(),
+                failed: Type.Number(),
+                cancelled: Type.Number(),
+              }),
+              rateLimiter: Type.Object({
+                isLocked: Type.Boolean(),
+                lockedBy: Type.Union([Type.String(), Type.Null()]),
+                lastCallAt: Type.Union([
+                  Type.String({ format: "date-time" }),
+                  Type.Null(),
+                ]),
+                callsToday: Type.Number(),
+              }),
+            }),
+          }),
+        },
+      },
+    },
+    async (_request, reply) => {
+      const status = await queueService.getSystemStatus();
+
+      return reply.send({
+        data: {
+          tasks: status.tasks,
+          rateLimiter: {
+            ...status.rateLimiter,
+            lastCallAt: status.rateLimiter.lastCallAt?.toISOString() ?? null,
+          },
+        },
       });
     }
   );

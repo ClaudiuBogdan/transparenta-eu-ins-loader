@@ -312,105 +312,164 @@ CREATE TABLE statistic_classifications_default PARTITION OF statistic_classifica
 CREATE INDEX idx_statistic_classifications_value ON statistic_classifications(classification_value_id);
 CREATE INDEX idx_statistic_classifications_statistic ON statistic_classifications(matrix_id, statistic_id);
 
--- Sync checkpoints for incremental sync
-CREATE TABLE sync_checkpoints (
+-- ============================================================================
+-- SYNC SYSTEM - Unified task and chunk tracking
+-- ============================================================================
+
+-- Status enum for sync tasks (matrix-level work requests)
+CREATE TYPE sync_task_status AS ENUM (
+    'PENDING',    -- Waiting to be processed
+    'PLANNING',   -- Generating chunks
+    'RUNNING',    -- Processing chunks
+    'COMPLETED',  -- All chunks done
+    'FAILED',     -- Unrecoverable error or max retries exceeded
+    'CANCELLED'   -- Manually cancelled
+);
+
+-- Status enum for sync chunks (individual API calls)
+CREATE TYPE sync_chunk_status AS ENUM (
+    'PENDING',    -- Not yet attempted
+    'RUNNING',    -- Currently fetching
+    'COMPLETED',  -- Successfully synced
+    'FAILED',     -- Failed, will retry
+    'EXHAUSTED',  -- Max retries exceeded
+    'SKIPPED'     -- Already up-to-date (resume mode)
+);
+
+-- Sync tasks - one per matrix sync request (replaces sync_jobs)
+CREATE TABLE sync_tasks (
     id SERIAL PRIMARY KEY,
-    matrix_id INTEGER NOT NULL REFERENCES matrices(id),
-    chunk_hash TEXT NOT NULL,
-    chunk_query TEXT NOT NULL,
-    last_synced_at TIMESTAMPTZ NOT NULL,
-    row_count INTEGER DEFAULT 0,
-    -- Added in migration 002: county-year chunking
-    county_code TEXT,
-    year SMALLINT,
-    classification_mode TEXT DEFAULT 'all',
-    cells_queried INTEGER,
-    cells_returned INTEGER,
+    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
+    
+    -- Request parameters (immutable after creation)
+    year_from SMALLINT NOT NULL,
+    year_to SMALLINT NOT NULL,
+    classification_mode TEXT NOT NULL DEFAULT 'totals-only',
+    county_code TEXT,  -- Optional filter
+    
+    -- Status
+    status sync_task_status NOT NULL DEFAULT 'PENDING',
+    priority SMALLINT NOT NULL DEFAULT 0,  -- Higher = more urgent
+    
+    -- Progress (updated as chunks complete)
+    chunks_total INTEGER,  -- Set after planning
+    chunks_completed INTEGER DEFAULT 0,
+    chunks_failed INTEGER DEFAULT 0,
+    rows_inserted INTEGER DEFAULT 0,
+    rows_updated INTEGER DEFAULT 0,
+    
+    -- Timing
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    
+    -- Error info
     error_message TEXT,
-    retry_count INTEGER DEFAULT 0,
-    -- Added in migration 003: lease-based locking
+    
+    -- Lease-based locking
     locked_until TIMESTAMPTZ,
     locked_by TEXT,
+    
+    -- Tracking
+    created_by TEXT NOT NULL DEFAULT 'cli'  -- 'cli' or 'api'
+);
+
+COMMENT ON TABLE sync_tasks IS 'Queue table for data sync tasks. One task per matrix sync request. Default year range: 2020-current year.';
+
+-- Index for finding next task to process
+CREATE INDEX idx_sync_tasks_queue ON sync_tasks (priority DESC, created_at ASC)
+    WHERE status = 'PENDING';
+
+-- Index for finding running tasks (stale lock detection)
+CREATE INDEX idx_sync_tasks_running ON sync_tasks (locked_until)
+    WHERE status IN ('PLANNING', 'RUNNING');
+
+-- Index for matrix lookup
+CREATE INDEX idx_sync_tasks_matrix ON sync_tasks (matrix_id);
+
+-- Index for status filtering
+CREATE INDEX idx_sync_tasks_status ON sync_tasks (status);
+
+-- Prevent duplicate active tasks for same matrix with same parameters
+CREATE UNIQUE INDEX idx_sync_tasks_active ON sync_tasks (matrix_id, year_from, year_to, classification_mode, COALESCE(county_code, ''))
+    WHERE status IN ('PENDING', 'PLANNING', 'RUNNING');
+
+-- Sync checkpoints - one per chunk within a task (or standalone for direct CLI syncs)
+CREATE TABLE sync_checkpoints (
+    id SERIAL PRIMARY KEY,
+    task_id INTEGER REFERENCES sync_tasks(id) ON DELETE CASCADE,  -- NULL for direct CLI syncs
+    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
+    
+    -- Chunk identification
+    chunk_hash TEXT NOT NULL,
+    chunk_index SMALLINT NOT NULL,  -- Order within task (1, 2, 3...)
+    
+    -- Chunk description (for debugging/display)
+    chunk_name TEXT NOT NULL,  -- e.g., "AB-2020-totals"
+    
+    -- Chunk parameters
+    county_code TEXT,
+    year_from SMALLINT,
+    year_to SMALLINT,
+    cells_estimated INTEGER NOT NULL,
+    
+    -- Status
+    status sync_chunk_status NOT NULL DEFAULT 'PENDING',
+    
+    -- Results (set on completion)
+    cells_returned INTEGER,
+    rows_synced INTEGER,
+    
+    -- Timing
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    
+    -- Error handling
+    error_message TEXT,
+    retry_count SMALLINT NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMPTZ,  -- NULL = ready to retry now
+    
+    -- Lease-based locking
+    locked_until TIMESTAMPTZ,
+    locked_by TEXT,
+    
     UNIQUE (matrix_id, chunk_hash)
 );
 
-CREATE INDEX idx_sync_checkpoints_matrix ON sync_checkpoints(matrix_id);
-CREATE INDEX idx_sync_checkpoints_chunk_lookup ON sync_checkpoints(matrix_id, county_code, year, classification_mode);
-CREATE INDEX idx_sync_checkpoints_lease ON sync_checkpoints(matrix_id, locked_until) WHERE locked_until IS NOT NULL;
+-- Index for finding next chunk to process within a task
+CREATE INDEX idx_sync_checkpoints_queue ON sync_checkpoints (task_id, chunk_index)
+    WHERE status IN ('PENDING', 'FAILED');
 
--- Sync job status enum
-CREATE TYPE sync_job_status AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED');
+-- Index for finding chunks ready to retry
+CREATE INDEX idx_sync_checkpoints_retry ON sync_checkpoints (next_retry_at)
+    WHERE status = 'FAILED' AND next_retry_at IS NOT NULL;
 
--- Sync jobs queue table
-CREATE TABLE sync_jobs (
-    id SERIAL PRIMARY KEY,
-    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
-    status sync_job_status NOT NULL DEFAULT 'PENDING',
-    year_from SMALLINT,
-    year_to SMALLINT,
-    priority SMALLINT NOT NULL DEFAULT 0,  -- Higher = more priority
-    flags JSONB NOT NULL DEFAULT '{}',  -- Sync options: skipExisting, force, chunkSize, etc.
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    started_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    rows_inserted INTEGER DEFAULT 0,
-    rows_updated INTEGER DEFAULT 0,
-    error_message TEXT,
-    created_by TEXT,  -- 'api', 'cli', etc.
-    -- Added in migration 003: lease-based locking
+-- Index for task progress queries
+CREATE INDEX idx_sync_checkpoints_task ON sync_checkpoints (task_id);
+
+-- Index for matrix lookup
+CREATE INDEX idx_sync_checkpoints_matrix ON sync_checkpoints (matrix_id);
+
+-- Sync rate limiter - single row for global INS API lock
+CREATE TABLE sync_rate_limiter (
+    id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),  -- Ensures single row
+    
+    -- Current lock
     locked_until TIMESTAMPTZ,
-    locked_by TEXT
+    locked_by TEXT,
+    
+    -- Rate limit config
+    min_interval_ms INTEGER NOT NULL DEFAULT 750,
+    
+    -- Stats
+    last_call_at TIMESTAMPTZ,
+    calls_today INTEGER NOT NULL DEFAULT 0,
+    stats_reset_at DATE NOT NULL DEFAULT CURRENT_DATE
 );
 
--- Default sync configuration (year range defaults)
-COMMENT ON TABLE sync_jobs IS 'Queue table for data sync jobs. Default year range: 2020-current year when not specified.';
-
-CREATE INDEX idx_sync_jobs_matrix ON sync_jobs(matrix_id);
-CREATE INDEX idx_sync_jobs_status ON sync_jobs(status);
-CREATE INDEX idx_sync_jobs_pending ON sync_jobs(priority DESC, created_at ASC) WHERE status = 'PENDING';
-CREATE INDEX idx_sync_jobs_created ON sync_jobs(created_at DESC);
-CREATE INDEX idx_sync_jobs_lease ON sync_jobs(priority DESC, created_at ASC) WHERE completed_at IS NULL;
-
--- Prevent duplicate pending/running jobs for same matrix
-CREATE UNIQUE INDEX idx_sync_jobs_active_matrix ON sync_jobs(matrix_id)
-    WHERE status IN ('PENDING', 'RUNNING');
-
--- Sync coverage tracking (from migration 002)
-CREATE TABLE sync_coverage (
-    id SERIAL PRIMARY KEY,
-    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
-    total_territories INTEGER DEFAULT 0,
-    synced_territories INTEGER DEFAULT 0,
-    total_years INTEGER DEFAULT 0,
-    synced_years INTEGER DEFAULT 0,
-    total_classifications INTEGER DEFAULT 0,
-    synced_classifications INTEGER DEFAULT 0,
-    expected_data_points BIGINT,
-    actual_data_points BIGINT DEFAULT 0,
-    null_value_count BIGINT DEFAULT 0,
-    missing_value_count BIGINT DEFAULT 0,
-    first_sync_at TIMESTAMPTZ,
-    last_sync_at TIMESTAMPTZ,
-    last_coverage_update TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (matrix_id)
-);
-
-CREATE INDEX idx_sync_coverage_matrix ON sync_coverage(matrix_id);
-
--- Per-dimension sync coverage (from migration 002)
-CREATE TABLE sync_dimension_coverage (
-    id SERIAL PRIMARY KEY,
-    matrix_id INTEGER NOT NULL REFERENCES matrices(id) ON DELETE CASCADE,
-    dim_index SMALLINT NOT NULL,
-    dimension_type dimension_type NOT NULL,
-    total_values INTEGER NOT NULL,
-    synced_values INTEGER DEFAULT 0,
-    missing_value_ids INTEGER[] DEFAULT '{}',
-    last_updated TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (matrix_id, dim_index)
-);
-
-CREATE INDEX idx_sync_dimension_coverage_matrix ON sync_dimension_coverage(matrix_id);
+-- Initialize rate limiter row
+INSERT INTO sync_rate_limiter (id) VALUES (1) ON CONFLICT DO NOTHING;
 
 -- ============================================================================
 -- HELPER FUNCTIONS
@@ -670,114 +729,228 @@ FROM label_mappings lm
 WHERE lm.is_unresolvable = TRUE
 ORDER BY lm.created_at DESC;
 
--- Sync coverage view with computed percentages
-CREATE OR REPLACE VIEW sync_coverage_view AS
+-- ============================================================================
+-- SYNC SYSTEM VIEWS
+-- ============================================================================
+
+-- Sync tasks view with matrix info and progress
+CREATE OR REPLACE VIEW v_sync_tasks AS
 SELECT
-    sc.id,
-    sc.matrix_id,
+    st.id,
+    st.matrix_id,
     m.ins_code as matrix_code,
     m.metadata->'names'->>'ro' as matrix_name,
-    sc.total_territories,
-    sc.synced_territories,
-    CASE WHEN sc.total_territories > 0
-         THEN ROUND((sc.synced_territories * 100.0 / sc.total_territories)::numeric, 1)
-         ELSE 100
-    END as territory_coverage_pct,
-    sc.total_years,
-    sc.synced_years,
-    CASE WHEN sc.total_years > 0
-         THEN ROUND((sc.synced_years * 100.0 / sc.total_years)::numeric, 1)
-         ELSE 100
-    END as year_coverage_pct,
-    sc.total_classifications,
-    sc.synced_classifications,
-    CASE WHEN sc.total_classifications > 0
-         THEN ROUND((sc.synced_classifications * 100.0 / sc.total_classifications)::numeric, 1)
-         ELSE 100
-    END as classification_coverage_pct,
-    sc.expected_data_points,
-    sc.actual_data_points,
-    CASE WHEN sc.expected_data_points > 0
-         THEN ROUND((sc.actual_data_points * 100.0 / sc.expected_data_points)::numeric, 1)
+    st.year_from,
+    st.year_to,
+    st.classification_mode,
+    st.county_code,
+    st.status,
+    st.priority,
+    st.chunks_total,
+    st.chunks_completed,
+    st.chunks_failed,
+    CASE WHEN st.chunks_total > 0
+         THEN ROUND((st.chunks_completed * 100.0 / st.chunks_total)::numeric, 1)
          ELSE 0
-    END as overall_coverage_pct,
-    sc.null_value_count,
-    sc.missing_value_count,
-    sc.first_sync_at,
-    sc.last_sync_at,
-    sc.last_coverage_update
-FROM sync_coverage sc
-JOIN matrices m ON sc.matrix_id = m.id;
+    END as progress_pct,
+    st.rows_inserted,
+    st.rows_updated,
+    st.created_at,
+    st.started_at,
+    st.completed_at,
+    st.error_message,
+    st.locked_until,
+    st.locked_by,
+    st.created_by,
+    CASE
+        WHEN st.locked_until > NOW() THEN TRUE
+        ELSE FALSE
+    END as is_locked
+FROM sync_tasks st
+JOIN matrices m ON st.matrix_id = m.id;
 
--- Checkpoint status by county view
-CREATE OR REPLACE VIEW sync_checkpoint_summary AS
-SELECT
-    sc.matrix_id,
-    m.ins_code as matrix_code,
-    sc.county_code,
-    sc.year,
-    sc.classification_mode,
-    COUNT(*) as chunk_count,
-    SUM(sc.row_count) as total_rows,
-    MIN(sc.last_synced_at) as first_sync,
-    MAX(sc.last_synced_at) as last_sync,
-    SUM(CASE WHEN sc.error_message IS NOT NULL THEN 1 ELSE 0 END) as error_count
-FROM sync_checkpoints sc
-JOIN matrices m ON sc.matrix_id = m.id
-GROUP BY sc.matrix_id, m.ins_code, sc.county_code, sc.year, sc.classification_mode;
-
--- Checkpoint status with lease info view
-CREATE OR REPLACE VIEW sync_checkpoint_status AS
+-- Sync checkpoints view with task and matrix info
+CREATE OR REPLACE VIEW v_sync_checkpoints AS
 SELECT
     sc.id,
+    sc.task_id,
     sc.matrix_id,
     m.ins_code as matrix_code,
     sc.chunk_hash,
+    sc.chunk_index,
+    sc.chunk_name,
     sc.county_code,
-    sc.year,
-    sc.classification_mode,
-    sc.row_count,
-    sc.last_synced_at,
+    sc.year_from,
+    sc.year_to,
+    sc.cells_estimated,
+    sc.status,
+    sc.cells_returned,
+    sc.rows_synced,
+    sc.created_at,
+    sc.started_at,
+    sc.completed_at,
     sc.error_message,
+    sc.retry_count,
+    sc.next_retry_at,
     sc.locked_until,
     sc.locked_by,
     CASE
-        WHEN sc.error_message IS NOT NULL THEN 'FAILED'
-        WHEN sc.locked_until > NOW() THEN 'RUNNING'
-        WHEN sc.locked_until IS NOT NULL AND sc.locked_until <= NOW() THEN 'EXPIRED'
-        WHEN sc.last_synced_at IS NOT NULL THEN 'COMPLETED'
-        ELSE 'AVAILABLE'
-    END as status
+        WHEN sc.locked_until > NOW() THEN TRUE
+        ELSE FALSE
+    END as is_locked
 FROM sync_checkpoints sc
 JOIN matrices m ON sc.matrix_id = m.id;
 
--- Sync jobs with lease status view
-CREATE OR REPLACE VIEW sync_jobs_lease_status AS
+-- Task summary by status
+CREATE OR REPLACE VIEW v_sync_task_summary AS
 SELECT
-    sj.id,
-    sj.matrix_id,
+    status,
+    COUNT(*) as task_count,
+    SUM(chunks_total) as total_chunks,
+    SUM(chunks_completed) as completed_chunks,
+    SUM(chunks_failed) as failed_chunks,
+    SUM(rows_inserted) as total_rows_inserted,
+    SUM(rows_updated) as total_rows_updated
+FROM sync_tasks
+GROUP BY status;
+
+-- Failed chunks awaiting retry
+CREATE OR REPLACE VIEW v_sync_failed_chunks AS
+SELECT
+    sc.id,
+    sc.task_id,
+    st.status as task_status,
     m.ins_code as matrix_code,
-    sj.year_from,
-    sj.year_to,
-    sj.priority,
-    sj.flags,
-    sj.created_at,
-    sj.started_at,
-    sj.completed_at,
-    sj.rows_inserted,
-    sj.rows_updated,
-    sj.error_message,
-    sj.locked_until,
-    sj.locked_by,
+    sc.chunk_name,
+    sc.error_message,
+    sc.retry_count,
+    sc.next_retry_at,
     CASE
-        WHEN sj.error_message IS NOT NULL AND sj.completed_at IS NULL THEN 'FAILED'
-        WHEN sj.completed_at IS NOT NULL THEN 'COMPLETED'
-        WHEN sj.locked_until > NOW() THEN 'RUNNING'
-        WHEN sj.locked_until IS NOT NULL AND sj.locked_until <= NOW() THEN 'EXPIRED'
-        ELSE 'PENDING'
-    END as status
-FROM sync_jobs sj
-JOIN matrices m ON sj.matrix_id = m.id;
+        WHEN sc.next_retry_at IS NULL THEN TRUE
+        WHEN sc.next_retry_at <= NOW() THEN TRUE
+        ELSE FALSE
+    END as ready_to_retry
+FROM sync_checkpoints sc
+JOIN sync_tasks st ON sc.task_id = st.id
+JOIN matrices m ON sc.matrix_id = m.id
+WHERE sc.status IN ('FAILED', 'EXHAUSTED')
+ORDER BY sc.next_retry_at NULLS FIRST;
+
+-- Matrix sync status overview (per-matrix view combining all sync info)
+CREATE OR REPLACE VIEW v_matrix_sync_status AS
+WITH latest_task AS (
+    -- Get the most recent task per matrix
+    SELECT DISTINCT ON (matrix_id)
+        matrix_id,
+        id as task_id,
+        status as task_status,
+        year_from as task_year_from,
+        year_to as task_year_to,
+        classification_mode,
+        county_code as task_county,
+        chunks_total,
+        chunks_completed,
+        chunks_failed,
+        rows_inserted as task_rows_inserted,
+        rows_updated as task_rows_updated,
+        created_at as task_created_at,
+        started_at as task_started_at,
+        completed_at as task_completed_at,
+        error_message as task_error
+    FROM sync_tasks
+    ORDER BY matrix_id, created_at DESC
+),
+data_coverage AS (
+    -- Actual data in statistics table
+    SELECT
+        s.matrix_id,
+        COUNT(*) as total_rows,
+        COUNT(DISTINCT s.territory_id) as territory_count,
+        MIN(tp.year) as data_year_min,
+        MAX(tp.year) as data_year_max,
+        COUNT(DISTINCT tp.year) as years_synced,
+        MAX(s.updated_at) as data_last_updated
+    FROM statistics s
+    JOIN time_periods tp ON s.time_period_id = tp.id
+    GROUP BY s.matrix_id
+),
+task_history AS (
+    -- Count of tasks by status per matrix
+    SELECT
+        matrix_id,
+        COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed_tasks,
+        COUNT(*) FILTER (WHERE status = 'FAILED') as failed_tasks,
+        COUNT(*) FILTER (WHERE status IN ('PENDING', 'PLANNING', 'RUNNING')) as active_tasks
+    FROM sync_tasks
+    GROUP BY matrix_id
+)
+SELECT
+    m.id as matrix_id,
+    m.ins_code,
+    m.metadata->'names'->>'ro' as name_ro,
+
+    -- Matrix dimensions
+    jsonb_array_length(m.dimensions) as dimension_count,
+    (m.metadata->'flags'->>'hasUatData')::boolean as has_uat_data,
+    (m.metadata->'flags'->>'hasCountyData')::boolean as has_county_data,
+
+    -- Available year range (from metadata)
+    (m.metadata->'yearRange'->>0)::int as available_year_from,
+    (m.metadata->'yearRange'->>1)::int as available_year_to,
+
+    -- Matrix sync status
+    m.sync_status,
+    m.last_sync_at,
+    m.sync_error,
+
+    -- Latest task info
+    lt.task_id,
+    lt.task_status,
+    lt.task_year_from,
+    lt.task_year_to,
+    lt.classification_mode,
+    lt.task_county,
+    lt.chunks_total,
+    lt.chunks_completed,
+    lt.chunks_failed,
+    CASE WHEN lt.chunks_total > 0
+         THEN ROUND((lt.chunks_completed * 100.0 / lt.chunks_total)::numeric, 1)
+         ELSE NULL
+    END as task_progress_pct,
+    lt.task_rows_inserted,
+    lt.task_rows_updated,
+    lt.task_created_at,
+    lt.task_completed_at,
+    lt.task_error,
+
+    -- Actual data coverage
+    COALESCE(dc.total_rows, 0) as data_rows,
+    COALESCE(dc.territory_count, 0) as data_territories,
+    dc.data_year_min,
+    dc.data_year_max,
+    COALESCE(dc.years_synced, 0) as data_years_count,
+    dc.data_last_updated,
+
+    -- Task history summary
+    COALESCE(th.completed_tasks, 0) as history_completed,
+    COALESCE(th.failed_tasks, 0) as history_failed,
+    COALESCE(th.active_tasks, 0) as history_active,
+
+    -- Computed status
+    CASE
+        WHEN lt.task_status IN ('PENDING', 'PLANNING', 'RUNNING') THEN 'SYNCING'
+        WHEN dc.total_rows > 0 AND m.sync_status = 'SYNCED' THEN 'SYNCED'
+        WHEN dc.total_rows > 0 THEN 'PARTIAL'
+        WHEN lt.task_status = 'FAILED' THEN 'FAILED'
+        ELSE 'NOT_SYNCED'
+    END as overall_status
+
+FROM matrices m
+LEFT JOIN latest_task lt ON m.id = lt.matrix_id
+LEFT JOIN data_coverage dc ON m.id = dc.matrix_id
+LEFT JOIN task_history th ON m.id = th.matrix_id;
+
+COMMENT ON VIEW v_matrix_sync_status IS 'Comprehensive matrix sync status combining metadata, task progress, and actual data coverage';
 
 -- ============================================================================
 -- DISCOVERY & ANALYTICS TABLES

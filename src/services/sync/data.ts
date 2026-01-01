@@ -100,6 +100,8 @@ export interface FullSyncOptions {
   noChunking?: boolean;
   /** Progress callback */
   onProgress?: (progress: FullSyncProgress) => void;
+  /** Task ID from sync queue (optional - null for direct CLI syncs) */
+  taskId?: number;
 }
 
 /** Progress for full sync */
@@ -115,6 +117,7 @@ export interface FullSyncProgress {
 
 /** Result of full sync */
 export interface FullSyncResult {
+  chunksTotal: number;
   chunksCompleted: number;
   chunksSkipped: number;
   chunksFailed: number;
@@ -286,6 +289,7 @@ export class DataSyncService {
       verbose = false,
       noChunking = false,
       onProgress,
+      taskId,
     } = options;
 
     // If no-chunking mode, use single API call approach
@@ -295,6 +299,7 @@ export class DataSyncService {
 
     const startTime = Date.now();
     const result: FullSyncResult = {
+      chunksTotal: 0,
       chunksCompleted: 0,
       chunksSkipped: 0,
       chunksFailed: 0,
@@ -364,6 +369,7 @@ export class DataSyncService {
 
     // 4. Process each chunk
     const totalChunks = chunkResult.chunks.length;
+    result.chunksTotal = totalChunks;
 
     for (let i = 0; i < totalChunks; i++) {
       const chunk = chunkResult.chunks[i]!;
@@ -397,7 +403,7 @@ export class DataSyncService {
       }
 
       // Try to claim chunk lease (prevents concurrent processing)
-      const claimed = await this.claimChunk(matrixInfo.id, chunk);
+      const claimed = await this.claimChunk(matrixInfo.id, chunk, taskId);
       if (!claimed) {
         if (verbose) {
           apiLogger.debug(
@@ -476,7 +482,7 @@ export class DataSyncService {
         }
 
         // Record checkpoint
-        await this.recordCheckpoint(matrixInfo.id, chunk, rows.length);
+        await this.recordCheckpoint(matrixInfo.id, chunk, rows.length, taskId);
 
         result.chunksCompleted++;
 
@@ -495,7 +501,12 @@ export class DataSyncService {
         result.errors.push(`Chunk ${chunkName}: ${errorMsg}`);
 
         // Record failed checkpoint
-        await this.recordFailedCheckpoint(matrixInfo.id, chunk, errorMsg);
+        await this.recordFailedCheckpoint(
+          matrixInfo.id,
+          chunk,
+          errorMsg,
+          taskId
+        );
       }
     }
 
@@ -540,10 +551,12 @@ export class DataSyncService {
       force = false,
       verbose = false,
       onProgress,
+      taskId,
     } = options;
 
     const startTime = Date.now();
     const result: FullSyncResult = {
+      chunksTotal: 1, // Single call = 1 chunk
       chunksCompleted: 0,
       chunksSkipped: 0,
       chunksFailed: 0,
@@ -709,7 +722,9 @@ export class DataSyncService {
         classificationMode,
         countyCode,
         rows.length,
-        cellCount
+        cellCount,
+        undefined, // no error
+        taskId
       );
 
       result.chunksCompleted = 1;
@@ -737,7 +752,8 @@ export class DataSyncService {
         countyCode,
         0,
         cellCount,
-        errorMsg
+        errorMsg,
+        taskId
       );
     }
 
@@ -832,41 +848,51 @@ export class DataSyncService {
   }
 
   /**
-   * Record checkpoint for full sync
+   * Record full sync checkpoint (for full matrix sync)
    */
   private async recordFullSyncCheckpoint(
     matrixId: number,
     chunkHash: string,
     yearFrom: number,
     yearTo: number,
-    classificationMode: ClassificationMode,
+    _classificationMode: ClassificationMode,
     countyCode: string | undefined,
     rowCount: number,
-    cellsQueried: number,
-    errorMessage?: string
+    cellsEstimated: number,
+    errorMessage?: string,
+    taskId?: number
   ): Promise<void> {
+    const now = new Date();
+    const status = errorMessage ? "FAILED" : "COMPLETED";
+
     await this.db
       .insertInto("sync_checkpoints")
       .values({
+        task_id: taskId ?? null, // Link to task if provided
         matrix_id: matrixId,
         chunk_hash: chunkHash,
-        chunk_query: `FULL:${String(yearFrom)}-${String(yearTo)}:${classificationMode}`,
+        chunk_index: 0,
+        chunk_name: `FULL:${String(yearFrom)}-${String(yearTo)}`,
         county_code: countyCode ?? null,
-        year: null, // null indicates full range
-        classification_mode: classificationMode,
-        cells_queried: cellsQueried,
+        year_from: yearFrom,
+        year_to: yearTo,
+        cells_estimated: cellsEstimated,
         cells_returned: rowCount,
-        row_count: rowCount,
-        last_synced_at: new Date(),
+        rows_synced: rowCount,
+        status,
+        started_at: now,
+        completed_at: now,
         error_message: errorMessage?.substring(0, 1000) ?? null,
         retry_count: errorMessage ? 1 : 0,
       })
       .onConflict((oc) =>
         oc.columns(["matrix_id", "chunk_hash"]).doUpdateSet({
-          row_count: rowCount,
-          cells_queried: cellsQueried,
+          task_id: taskId ?? null, // Update task_id on conflict too
+          rows_synced: rowCount,
+          cells_estimated: cellsEstimated,
           cells_returned: rowCount,
-          last_synced_at: new Date(),
+          status,
+          completed_at: now,
           error_message: errorMessage?.substring(0, 1000) ?? null,
         })
       )
@@ -882,18 +908,18 @@ export class DataSyncService {
   ): Promise<{ rowCount: number; lastSyncedAt: Date } | null> {
     const checkpoint = await this.db
       .selectFrom("sync_checkpoints")
-      .select(["row_count", "last_synced_at"])
+      .select(["rows_synced", "completed_at"])
       .where("matrix_id", "=", matrixId)
       .where("chunk_hash", "=", chunkHash)
-      .where("error_message", "is", null)
+      .where("status", "=", "COMPLETED")
       .where("cells_returned", "is not", null)
       .executeTakeFirst();
 
-    if (!checkpoint) return null;
+    if (!checkpoint?.completed_at) return null;
 
     return {
-      rowCount: checkpoint.row_count,
-      lastSyncedAt: checkpoint.last_synced_at,
+      rowCount: checkpoint.rows_synced ?? 0,
+      lastSyncedAt: checkpoint.completed_at,
     };
   }
 
@@ -903,24 +929,27 @@ export class DataSyncService {
   private async recordCheckpoint(
     matrixId: number,
     chunk: SyncChunk,
-    rowCount: number
+    rowCount: number,
+    taskId?: number
   ): Promise<void> {
+    const now = new Date();
     await this.db
       .insertInto("sync_checkpoints")
       .values({
+        task_id: taskId ?? null, // Link to task if provided
         matrix_id: matrixId,
         chunk_hash: chunk.chunkHash,
-        chunk_query: chunk.chunkQuery,
+        chunk_index: 0,
+        chunk_name: getChunkDisplayName(chunk),
         county_code: chunk.countyCode,
-        year:
-          chunk.yearFrom !== null && chunk.yearFrom === chunk.yearTo
-            ? chunk.yearFrom
-            : null,
-        classification_mode: chunk.classificationMode,
-        cells_queried: chunk.cellCount,
+        year_from: chunk.yearFrom,
+        year_to: chunk.yearTo,
+        cells_estimated: chunk.cellCount,
         cells_returned: rowCount,
-        row_count: rowCount,
-        last_synced_at: new Date(),
+        rows_synced: rowCount,
+        status: "COMPLETED",
+        started_at: now,
+        completed_at: now,
         error_message: null,
         retry_count: 0,
         // Clear lease on successful completion
@@ -929,10 +958,12 @@ export class DataSyncService {
       })
       .onConflict((oc) =>
         oc.columns(["matrix_id", "chunk_hash"]).doUpdateSet({
-          row_count: rowCount,
-          cells_queried: chunk.cellCount,
+          task_id: taskId ?? null, // Update task_id on conflict too
+          rows_synced: rowCount,
+          cells_estimated: chunk.cellCount,
           cells_returned: rowCount,
-          last_synced_at: new Date(),
+          status: "COMPLETED",
+          completed_at: now,
           error_message: null,
           // Clear lease on successful completion
           locked_until: null,
@@ -948,24 +979,27 @@ export class DataSyncService {
   private async recordFailedCheckpoint(
     matrixId: number,
     chunk: SyncChunk,
-    errorMessage: string
+    errorMessage: string,
+    taskId?: number
   ): Promise<void> {
+    const now = new Date();
     await this.db
       .insertInto("sync_checkpoints")
       .values({
+        task_id: taskId ?? null, // Link to task if provided
         matrix_id: matrixId,
         chunk_hash: chunk.chunkHash,
-        chunk_query: chunk.chunkQuery,
+        chunk_index: 0,
+        chunk_name: getChunkDisplayName(chunk),
         county_code: chunk.countyCode,
-        year:
-          chunk.yearFrom !== null && chunk.yearFrom === chunk.yearTo
-            ? chunk.yearFrom
-            : null,
-        classification_mode: chunk.classificationMode,
-        cells_queried: chunk.cellCount,
+        year_from: chunk.yearFrom,
+        year_to: chunk.yearTo,
+        cells_estimated: chunk.cellCount,
         cells_returned: null,
-        row_count: 0,
-        last_synced_at: new Date(),
+        rows_synced: 0,
+        status: "FAILED",
+        started_at: now,
+        completed_at: now,
         error_message: errorMessage.substring(0, 1000),
         retry_count: 1,
         // Clear lease on failure (allows retry)
@@ -974,8 +1008,10 @@ export class DataSyncService {
       })
       .onConflict((oc) =>
         oc.columns(["matrix_id", "chunk_hash"]).doUpdateSet({
+          task_id: taskId ?? null, // Update task_id on conflict too
+          status: "FAILED",
           error_message: errorMessage.substring(0, 1000),
-          last_synced_at: new Date(),
+          completed_at: now,
           retry_count: sql`sync_checkpoints.retry_count + 1`,
           // Clear lease on failure (allows retry)
           locked_until: null,
@@ -991,7 +1027,8 @@ export class DataSyncService {
    */
   private async claimChunk(
     matrixId: number,
-    chunk: SyncChunk
+    chunk: SyncChunk,
+    taskId?: number
   ): Promise<boolean> {
     const leaseExpiry = new Date(Date.now() + CHUNK_LEASE_DURATION_MS);
     const now = new Date();
@@ -1009,19 +1046,19 @@ export class DataSyncService {
       await this.db
         .insertInto("sync_checkpoints")
         .values({
+          task_id: taskId ?? null, // Link to task if provided
           matrix_id: matrixId,
           chunk_hash: chunk.chunkHash,
-          chunk_query: chunk.chunkQuery,
+          chunk_index: 0,
+          chunk_name: getChunkDisplayName(chunk),
           county_code: chunk.countyCode,
-          year:
-            chunk.yearFrom !== null && chunk.yearFrom === chunk.yearTo
-              ? chunk.yearFrom
-              : null,
-          classification_mode: chunk.classificationMode,
-          cells_queried: null,
+          year_from: chunk.yearFrom,
+          year_to: chunk.yearTo,
+          cells_estimated: chunk.cellCount,
           cells_returned: null,
-          row_count: 0,
-          last_synced_at: now,
+          rows_synced: 0,
+          status: "PENDING",
+          started_at: now,
           error_message: null,
           retry_count: 0,
           locked_until: leaseExpiry,
@@ -1096,120 +1133,31 @@ export class DataSyncService {
   }
 
   /**
-   * Update coverage metrics for a matrix
+   * Update matrix sync status and timestamp
    */
   private async updateCoverage(matrixId: number): Promise<void> {
-    // Count synced statistics
+    // Count synced statistics for logging
     const stats = await this.db
       .selectFrom("statistics")
-      .select([
-        this.db.fn.count<number>("id").as("total_rows"),
-        this.db.fn
-          .countAll<number>()
-          .filterWhere("value", "is", null)
-          .as("null_count"),
-        this.db.fn
-          .countAll<number>()
-          .filterWhere("value_status", "=", "missing")
-          .as("missing_count"),
-      ])
+      .select([this.db.fn.count<number>("id").as("total_rows")])
       .where("matrix_id", "=", matrixId)
       .executeTakeFirst();
 
-    // Count unique territories
-    const territories = await this.db
-      .selectFrom("statistics")
-      .select(this.db.fn.count<number>("territory_id").distinct().as("count"))
-      .where("matrix_id", "=", matrixId)
-      .where("territory_id", "is not", null)
-      .executeTakeFirst();
-
-    // Count unique years
-    const years = await this.db
-      .selectFrom("statistics")
-      .innerJoin("time_periods", "statistics.time_period_id", "time_periods.id")
-      .select(
-        this.db.fn.count<number>("time_periods.year").distinct().as("count")
-      )
-      .where("statistics.matrix_id", "=", matrixId)
-      .executeTakeFirst();
-
-    // Get total territories from nom_items
-    const totalTerritories = await this.db
-      .selectFrom("matrix_nom_items")
-      .select(this.db.fn.count<number>("id").as("count"))
-      .where("matrix_id", "=", matrixId)
-      .where("dimension_type", "=", "TERRITORIAL")
-      .executeTakeFirst();
-
-    // Get total years from nom_items
-    const totalYears = await this.db
-      .selectFrom("matrix_nom_items")
-      .select(this.db.fn.count<number>("id").as("count"))
-      .where("matrix_id", "=", matrixId)
-      .where("dimension_type", "=", "TEMPORAL")
-      .executeTakeFirst();
-
-    // Get total classifications from nom_items
-    const totalClassifications = await this.db
-      .selectFrom("matrix_nom_items")
-      .select(this.db.fn.count<number>("id").as("count"))
-      .where("matrix_id", "=", matrixId)
-      .where("dimension_type", "=", "CLASSIFICATION")
-      .executeTakeFirst();
-
-    // Count unique synced classifications
-    const syncedClassifications = await this.db
-      .selectFrom("statistic_classifications")
-      .select(
-        this.db.fn
-          .count<number>("classification_value_id")
-          .distinct()
-          .as("count")
-      )
-      .where("matrix_id", "=", matrixId)
-      .executeTakeFirst();
-
-    // Upsert coverage
+    // Update matrix last_sync_at timestamp
     await this.db
-      .insertInto("sync_coverage")
-      .values({
-        matrix_id: matrixId,
-        total_territories: totalTerritories?.count ?? 0,
-        synced_territories: territories?.count ?? 0,
-        total_years: totalYears?.count ?? 0,
-        synced_years: years?.count ?? 0,
-        total_classifications: totalClassifications?.count ?? 0,
-        synced_classifications: syncedClassifications?.count ?? 0,
-        actual_data_points: stats?.total_rows ?? 0,
-        expected_data_points: null,
-        null_value_count: stats?.null_count ?? 0,
-        missing_value_count: stats?.missing_count ?? 0,
-        first_sync_at: new Date(),
+      .updateTable("matrices")
+      .set({
         last_sync_at: new Date(),
       })
-      .onConflict((oc) =>
-        oc.column("matrix_id").doUpdateSet({
-          synced_territories: territories?.count ?? 0,
-          synced_years: years?.count ?? 0,
-          synced_classifications: syncedClassifications?.count ?? 0,
-          actual_data_points: stats?.total_rows ?? 0,
-          null_value_count: stats?.null_count ?? 0,
-          missing_value_count: stats?.missing_count ?? 0,
-          last_sync_at: new Date(),
-          last_coverage_update: new Date(),
-        })
-      )
+      .where("id", "=", matrixId)
       .execute();
 
     apiLogger.info(
       {
         matrixId,
-        syncedTerritories: territories?.count ?? 0,
-        syncedYears: years?.count ?? 0,
         totalRows: stats?.total_rows ?? 0,
       },
-      "Updated coverage metrics"
+      "Updated matrix sync timestamp"
     );
   }
 

@@ -6,12 +6,13 @@
 # at a time to get full locality-level data.
 #
 # Usage: ./scripts/sync-uat-matrix.sh <MATRIX_CODE> [YEAR_RANGE]
-# Example: ./scripts/sync-uat-matrix.sh POP107D 2020-2024
+# Example: ./scripts/sync-uat-matrix.sh POP107D 2016-2026
 
 set -e
 
+CURRENT_YEAR=$(date +%Y)
 MATRIX_CODE="${1:-POP107D}"
-YEAR_RANGE="${2:-2020-2024}"
+YEAR_RANGE="${2:-2016-$CURRENT_YEAR}"
 
 # 42 counties in Romania (NUTS3 territory codes)
 COUNTIES=(

@@ -20,6 +20,7 @@ Romanian statistical data API providing access to INS (Institutul National de St
    - [Statistics](#statistics)
    - [Analytics](#analytics)
    - [Discovery](#discovery)
+   - [Sync (Data Synchronization)](#sync-data-synchronization)
 4. [Error Handling](#error-handling)
 5. [Pagination](#pagination)
 6. [Common Use Cases](#common-use-cases)
@@ -1075,6 +1076,332 @@ curl "http://localhost:3000/api/v1/indicators"
       "demographics": [...]
     },
     "total": 3
+  }
+}
+```
+
+---
+
+### Sync (Data Synchronization)
+
+Endpoints for monitoring and triggering data synchronization from the INS Tempo API.
+
+#### Get Sync Status
+
+Get overall sync status summary with matrix counts by status.
+
+```http
+GET /api/v1/sync/status
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `status` | string | No | Filter by status: `PENDING`, `SYNCING`, `SYNCED`, `FAILED`, `STALE` |
+| `hasData` | boolean | No | Filter matrices with/without data |
+| `limit` | number | No | Results per page (default: 50, max: 500) |
+| `cursor` | string | No | Pagination cursor |
+
+```bash
+# Get overall sync status
+curl "http://localhost:3000/api/v1/sync/status"
+
+# Get only synced matrices
+curl "http://localhost:3000/api/v1/sync/status?status=SYNCED"
+
+# Get matrices without data
+curl "http://localhost:3000/api/v1/sync/status?hasData=false"
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "summary": {
+      "total": 1898,
+      "pending": 1500,
+      "syncing": 2,
+      "synced": 350,
+      "failed": 46,
+      "stale": 0,
+      "withData": 320
+    },
+    "queue": {
+      "pendingTasks": 5,
+      "planningTasks": 0,
+      "runningTasks": 1
+    },
+    "matrices": [
+      {
+        "insCode": "POP105A",
+        "name": "Populatia rezidenta la 1 ianuarie...",
+        "syncStatus": "SYNCED",
+        "lastSyncAt": "2025-01-15T10:30:00.000Z",
+        "hasData": true,
+        "dataPointCount": 5,
+        "syncError": null
+      }
+    ]
+  },
+  "meta": {
+    "pagination": {
+      "cursor": "POP106A",
+      "hasMore": true,
+      "limit": 50,
+      "total": 1898
+    }
+  }
+}
+```
+
+#### Queue Sync Task
+
+Create a sync task for a specific matrix. The task is added to the queue and processed by the sync worker.
+
+```http
+POST /api/v1/sync/data/:matrixCode
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `yearFrom` | number | No | Start year (default: 2014) |
+| `yearTo` | number | No | End year (default: current year) |
+| `classificationMode` | string | No | `totals-only` (default) or `all` |
+| `countyCode` | string | No | Limit sync to specific county code |
+| `priority` | number | No | Task priority (-10 to 10, default: 0) |
+
+```bash
+# Queue sync for POP105A with defaults
+curl -X POST "http://localhost:3000/api/v1/sync/data/POP105A"
+
+# Queue sync for specific year range
+curl -X POST "http://localhost:3000/api/v1/sync/data/POP105A" \
+  -H "Content-Type: application/json" \
+  -d '{"yearFrom": 2020, "yearTo": 2024}'
+
+# Queue high-priority sync
+curl -X POST "http://localhost:3000/api/v1/sync/data/POP105A" \
+  -H "Content-Type: application/json" \
+  -d '{"priority": 5}'
+```
+
+**Response (201 Created - New Task):**
+```json
+{
+  "data": {
+    "task": {
+      "id": 42,
+      "matrixCode": "POP105A",
+      "matrixName": "Populatia rezidenta la 1 ianuarie...",
+      "status": "PENDING",
+      "yearFrom": 2014,
+      "yearTo": 2025,
+      "classificationMode": "totals-only",
+      "countyCode": null,
+      "priority": 0,
+      "chunksTotal": null,
+      "chunksCompleted": 0,
+      "chunksFailed": 0,
+      "createdAt": "2025-01-15T10:30:00.000Z",
+      "startedAt": null,
+      "completedAt": null,
+      "rowsInserted": 0,
+      "rowsUpdated": 0,
+      "errorMessage": null
+    },
+    "isNewTask": true,
+    "message": "Sync task created for matrix POP105A (years 2014-2025). Task ID: 42. Run 'pnpm cli sync worker' to process the queue."
+  }
+}
+```
+
+**Response (200 OK - Existing Task):**
+```json
+{
+  "data": {
+    "task": { ... },
+    "isNewTask": false,
+    "message": "Sync task already pending for matrix POP105A. Task ID: 42"
+  }
+}
+```
+
+#### Get Sync Task
+
+Get detailed status of a specific sync task.
+
+```http
+GET /api/v1/sync/tasks/:taskId
+```
+
+```bash
+curl "http://localhost:3000/api/v1/sync/tasks/42"
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "id": 42,
+    "matrixCode": "POP105A",
+    "matrixName": "Populatia rezidenta la 1 ianuarie...",
+    "status": "RUNNING",
+    "yearFrom": 2014,
+    "yearTo": 2025,
+    "classificationMode": "totals-only",
+    "countyCode": null,
+    "priority": 0,
+    "chunksTotal": 12,
+    "chunksCompleted": 5,
+    "chunksFailed": 0,
+    "createdAt": "2025-01-15T10:30:00.000Z",
+    "startedAt": "2025-01-15T10:31:00.000Z",
+    "completedAt": null,
+    "rowsInserted": 250,
+    "rowsUpdated": 0,
+    "errorMessage": null
+  }
+}
+```
+
+#### List Sync Tasks
+
+Get paginated list of sync tasks with optional filters.
+
+```http
+GET /api/v1/sync/tasks
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `status` | string | No | Filter: `PENDING`, `PLANNING`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED` |
+| `matrixCode` | string | No | Filter by matrix INS code |
+| `limit` | number | No | Results per page (default: 20, max: 100) |
+| `cursor` | string | No | Pagination cursor (task ID) |
+
+```bash
+# List all tasks
+curl "http://localhost:3000/api/v1/sync/tasks"
+
+# List failed tasks
+curl "http://localhost:3000/api/v1/sync/tasks?status=FAILED"
+
+# List tasks for a specific matrix
+curl "http://localhost:3000/api/v1/sync/tasks?matrixCode=POP105A"
+```
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "id": 42,
+      "matrixCode": "POP105A",
+      "matrixName": "Populatia rezidenta...",
+      "status": "COMPLETED",
+      "yearFrom": 2014,
+      "yearTo": 2025,
+      "classificationMode": "totals-only",
+      "countyCode": null,
+      "priority": 0,
+      "chunksTotal": 12,
+      "chunksCompleted": 12,
+      "chunksFailed": 0,
+      "createdAt": "2025-01-15T10:30:00.000Z",
+      "startedAt": "2025-01-15T10:31:00.000Z",
+      "completedAt": "2025-01-15T10:35:00.000Z",
+      "rowsInserted": 500,
+      "rowsUpdated": 0,
+      "errorMessage": null
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "cursor": "41",
+      "hasMore": true,
+      "limit": 20,
+      "total": 150
+    }
+  }
+}
+```
+
+#### Cancel Sync Task
+
+Cancel a pending, planning, or running sync task.
+
+```http
+DELETE /api/v1/sync/tasks/:taskId
+```
+
+```bash
+curl -X DELETE "http://localhost:3000/api/v1/sync/tasks/42"
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "id": 42,
+    "matrixCode": "POP105A",
+    "matrixName": "Populatia rezidenta...",
+    "status": "CANCELLED",
+    ...
+  }
+}
+```
+
+#### Retry Failed Task
+
+Reset a failed sync task to pending status for retry.
+
+```http
+POST /api/v1/sync/tasks/:taskId/retry
+```
+
+```bash
+curl -X POST "http://localhost:3000/api/v1/sync/tasks/42/retry"
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "success": true,
+    "message": "Task 42 reset for retry. Run 'pnpm cli sync worker' to process the queue."
+  }
+}
+```
+
+#### Get Sync System Status
+
+Get overall sync system status including task counts and rate limiter info.
+
+```http
+GET /api/v1/sync/system
+```
+
+```bash
+curl "http://localhost:3000/api/v1/sync/system"
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "tasks": {
+      "pending": 5,
+      "planning": 0,
+      "running": 1,
+      "completed": 142,
+      "failed": 3,
+      "cancelled": 2
+    },
+    "rateLimiter": {
+      "isLocked": true,
+      "lockedBy": "worker-1",
+      "lastCallAt": "2025-01-15T10:35:00.000Z",
+      "callsToday": 1250
+    }
   }
 }
 ```

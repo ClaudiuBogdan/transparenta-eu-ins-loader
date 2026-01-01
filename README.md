@@ -333,6 +333,8 @@ pnpm cli sync data --stale-only      # Only STALE status
 ```bash
 pnpm cli sync status           # Overview of all matrices
 pnpm cli sync status --failed  # Show only failed syncs
+pnpm cli sync tasks            # View queued/running tasks
+pnpm cli sync history          # View task history
 ```
 
 **Via API:**
@@ -340,57 +342,74 @@ pnpm cli sync status --failed  # Show only failed syncs
 ```bash
 # Get sync status summary
 curl http://localhost:3000/api/v1/sync/status
+
+# Get system-wide task summary
+curl http://localhost:3000/api/v1/sync/system
 ```
 
-### Queue-Based Sync API
-
-Data sync requests go through a job queue to prevent INS API rate limiting and duplicate requests.
-
-**Queue a sync job:**
+**Via SQL (v_matrix_sync_status view):**
 
 ```bash
-# Request data sync (returns job ID immediately)
+PGPASSWORD=ins_tempo psql -h jupiter -U ins_tempo -d ins_tempo -c "
+SELECT ins_code, task_status, task_progress_pct as progress,
+       data_rows, data_year_min || '-' || data_year_max as years, overall_status
+FROM v_matrix_sync_status
+WHERE task_id IS NOT NULL OR data_rows > 0
+ORDER BY data_rows DESC LIMIT 20;"
+```
+
+### Task-Based Sync API
+
+Data sync requests go through a task queue to prevent INS API rate limiting and duplicate requests.
+
+**Queue a sync task:**
+
+```bash
+# Request data sync (returns task ID immediately)
 curl -X POST http://localhost:3000/api/v1/sync/data/POP105A \
   -H "Content-Type: application/json" \
   -d '{"yearFrom": 2020, "yearTo": 2024}'
 
 # Response:
-# {"data":{"jobId":1,"status":"PENDING","message":"Sync job queued"}}
+# {"data":{"task":{"id":1,"status":"PENDING",...},"isNewTask":true}}
 ```
 
-**Check job status:**
+**Check task status:**
 
 ```bash
-# Get specific job status
-curl http://localhost:3000/api/v1/sync/jobs/1
+# Get specific task status
+curl http://localhost:3000/api/v1/sync/tasks/1
 
-# List all jobs (with optional filters)
-curl "http://localhost:3000/api/v1/sync/jobs?status=PENDING&limit=20"
+# List all tasks (with optional filters)
+curl "http://localhost:3000/api/v1/sync/tasks?status=PENDING&limit=20"
 
-# Cancel a pending job
-curl -X DELETE http://localhost:3000/api/v1/sync/jobs/1
+# Cancel a pending task
+curl -X DELETE http://localhost:3000/api/v1/sync/tasks/1
+
+# Retry a failed task
+curl -X POST http://localhost:3000/api/v1/sync/tasks/1/retry
 ```
 
 **Process the queue (run worker):**
 
 ```bash
-# Start sync worker (processes jobs until queue is empty)
+# Start sync worker (processes tasks until queue is empty)
 pnpm cli sync worker
 
-# Process one job and exit
+# Process one task and exit
 pnpm cli sync worker --once
 
-# Process max 10 jobs
-pnpm cli sync worker --limit 10
+# List queued tasks
+pnpm cli sync tasks
 
-# List queued jobs
-pnpm cli sync jobs
-pnpm cli sync jobs --status PENDING
+# Retry all failed tasks
+pnpm cli sync retry --all
+pnpm cli sync retry --task 123
 ```
 
-**Job states:** `PENDING` → `RUNNING` → `COMPLETED` | `FAILED` | `CANCELLED`
+**Task states:** `PENDING` → `PLANNING` → `RUNNING` → `COMPLETED` | `FAILED` | `CANCELLED`
 
-**Duplicate prevention:** If a sync job for the same matrix is already pending or running, the API returns the existing job ID instead of creating a duplicate.
+**Duplicate prevention:** If a sync task for the same matrix with the same parameters is already pending or running, the API returns the existing task instead of creating a duplicate.
 
 ### Resync Strategy
 
@@ -428,8 +447,9 @@ Before any sync, the database schema must be created.
 | `units_of_measure` | Units (persons, thousands, percentage, etc.) |
 | `statistics` | Main fact table (partitioned into 2,000 partitions) |
 | `statistic_classifications` | Junction table linking facts to classifications |
-| `sync_checkpoints` | Tracks chunk-level sync progress |
-| `sync_coverage` | Tracks matrix-level sync completeness |
+| `sync_tasks` | Task queue for data sync operations |
+| `sync_checkpoints` | Tracks chunk-level sync progress within tasks |
+| `sync_rate_limiter` | Global rate limiting for INS API calls |
 
 **Why partitioning:** The `statistics` table is partitioned by `matrix_id` (2,000 pre-created partitions) because it can contain billions of rows. Partitioning enables parallel inserts and faster queries.
 
@@ -663,11 +683,12 @@ SET status = 'COMPLETED', rows_synced = 150
 WHERE matrix_id = 123 AND chunk_hash = 'sha256...';
 ```
 
-After all chunks:
+After all chunks complete, task is marked done:
 
 ```sql
-INSERT INTO sync_coverage (matrix_id, total_territories, synced_territories, ...)
-VALUES (123, 43, 43, ...);
+UPDATE sync_tasks
+SET status = 'COMPLETED', completed_at = NOW()
+WHERE id = 123;
 ```
 
 ---
@@ -679,7 +700,7 @@ VALUES (123, 43, 43, ...);
 | Migration | All tables (schema creation) | - |
 | Territory Seed | `territories` | - |
 | Metadata Sync | `contexts`, `matrices`, `matrix_dimensions`, `matrix_nom_items`, `classification_types`, `classification_values`, `time_periods` | `territories` |
-| Data Sync | `statistics`, `statistic_classifications`, `sync_checkpoints`, `sync_coverage` | `matrices`, `matrix_dimensions`, `matrix_nom_items`, `territories` |
+| Data Sync | `statistics`, `statistic_classifications`, `sync_tasks`, `sync_checkpoints` | `matrices`, `matrix_dimensions`, `matrix_nom_items`, `territories` |
 
 ---
 
@@ -702,10 +723,12 @@ WHERE matrix_id = (SELECT id FROM matrices WHERE ins_code = 'POP105A')
 GROUP BY status;
 ```
 
-**Check data coverage:**
+**Check data coverage (use v_matrix_sync_status view):**
 
 ```sql
-SELECT * FROM sync_coverage WHERE matrix_id = 123;
+SELECT ins_code, data_rows, data_year_min, data_year_max, overall_status
+FROM v_matrix_sync_status
+WHERE ins_code = 'POP105A';
 ```
 
 ## FAQ
@@ -1212,7 +1235,7 @@ encQuery = "105:4494:9685"
 **Our approach:**
 
 - Log but don't fail on missing data
-- Track coverage in `sync_coverage` table
+- Track progress in `sync_tasks` and `sync_checkpoints` tables
 - Allow partial syncs to complete
 
 #### HTTP (Not HTTPS)
@@ -1249,30 +1272,39 @@ Syncing all ~1,898 matrices with full data takes days. You want to run multiple 
 
 #### Lease-Based Locking
 
-Instead of persistent locks, workers acquire **time-limited leases**.
+Instead of persistent locks, workers acquire **time-limited leases** directly on tasks.
 
 **How it works:**
 
 ```sql
--- Worker tries to acquire a lease
-INSERT INTO sync_leases (chunk_hash, worker_id, acquired_at, expires_at)
-VALUES ('abc123', 'host1-pid-12345', NOW(), NOW() + INTERVAL '2 minutes')
-ON CONFLICT (chunk_hash) DO NOTHING
+-- Worker claims a task with atomic UPDATE
+UPDATE sync_tasks
+SET status = 'RUNNING',
+    locked_until = NOW() + INTERVAL '2 minutes',
+    locked_by = 'host1-pid-12345',
+    started_at = NOW()
+WHERE id = (
+    SELECT id FROM sync_tasks
+    WHERE status = 'PENDING'
+    ORDER BY priority DESC, created_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
 RETURNING *;
 ```
 
-- If INSERT succeeds → worker owns the chunk
-- If INSERT fails (conflict) → another worker has it
+- Atomic claim prevents race conditions
+- `FOR UPDATE SKIP LOCKED` avoids contention
 - Lease expires after 2 minutes → auto-cleanup
 
-**The `sync_leases` table:**
+**Lease columns on `sync_tasks`:**
 
 ```sql
-sync_leases (
-  chunk_hash TEXT PRIMARY KEY,
-  worker_id TEXT NOT NULL,
-  acquired_at TIMESTAMPTZ,
-  expires_at TIMESTAMPTZ
+sync_tasks (
+  ...
+  locked_until TIMESTAMPTZ,  -- When lease expires
+  locked_by TEXT,            -- Worker ID holding lease
+  ...
 )
 ```
 
@@ -1304,11 +1336,13 @@ This helps with:
 
 #### Automatic Cleanup
 
-Expired leases are cleaned up by active workers:
+Expired leases are reclaimed automatically when workers look for tasks:
 
 ```sql
--- Before acquiring new leases, clean up expired ones
-DELETE FROM sync_leases WHERE expires_at < NOW();
+-- Expired RUNNING tasks become claimable again
+SELECT id FROM sync_tasks
+WHERE status = 'RUNNING' AND locked_until < NOW()
+ORDER BY priority DESC, created_at ASC;
 ```
 
 This means:
@@ -1345,37 +1379,46 @@ Both workers share the same PostgreSQL database, so leases coordinate automatica
 
 If a worker crashes mid-sync:
 
-1. Its leases expire after 2 minutes
-2. Another worker (or restart) picks up remaining chunks
+1. Its task lease expires after 2 minutes
+2. Another worker (or restart) picks up the task
 3. Completed chunks are skipped via `sync_checkpoints`
 
 ```sql
--- Check chunk status before processing
-SELECT status FROM sync_checkpoints
-WHERE matrix_id = 'POP105A' AND chunk_hash = 'abc123';
+-- Check chunk progress for a task
+SELECT status, COUNT(*) FROM sync_checkpoints
+WHERE task_id = 123
+GROUP BY status;
 
--- If COMPLETED, skip. If PENDING/FAILED, process.
+-- Chunks with status COMPLETED are skipped on resume
 ```
 
 #### Monitoring Workers
 
-**See active leases:**
+**See active tasks:**
 
 ```sql
-SELECT chunk_hash, worker_id, acquired_at, expires_at
-FROM sync_leases
-WHERE expires_at > NOW()
-ORDER BY acquired_at;
+SELECT id, locked_by, locked_until, status, chunks_completed, chunks_total
+FROM sync_tasks
+WHERE status = 'RUNNING' AND locked_until > NOW()
+ORDER BY started_at;
 ```
 
-**See worker activity:**
+**See task history by worker:**
 
 ```sql
-SELECT worker_id, COUNT(*) as chunks_completed, MAX(completed_at) as last_activity
-FROM sync_checkpoints
+SELECT locked_by as worker, COUNT(*) as tasks_completed,
+       SUM(rows_inserted) as total_rows, MAX(completed_at) as last_activity
+FROM sync_tasks
 WHERE status = 'COMPLETED'
-GROUP BY worker_id
+GROUP BY locked_by
 ORDER BY last_activity DESC;
+```
+
+**Use CLI for quick monitoring:**
+
+```bash
+pnpm cli sync tasks              # View all active tasks
+pnpm cli sync history            # View completed/failed tasks
 ```
 
 #### Trade-offs

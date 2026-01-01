@@ -360,3 +360,102 @@ Solution: Split into smaller queries (e.g., query 10 years at a time).
 
 - Add 750ms+ delay between requests
 - Retry with exponential backoff
+
+---
+
+## Data Sync Commands
+
+The CLI includes commands for syncing statistical data from INS to the local PostgreSQL database.
+
+### Sync Workflow
+
+```bash
+# 1. Database setup
+pnpm db:migrate             # Creates schema + partitions
+
+# 2. Sync metadata
+pnpm cli sync all           # Full sync: contexts, matrices, metadata
+# OR step by step:
+pnpm cli sync contexts      # Domain hierarchy
+pnpm cli sync matrices      # Matrix catalog
+pnpm cli sync matrices --full --skip-existing  # Detailed metadata
+
+# 3. Sync statistical data
+pnpm cli sync data          # Sync all matrices
+pnpm cli sync data --matrix POP105A  # Sync specific matrix
+```
+
+### Sync Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `sync contexts` | Sync context hierarchy (domains) |
+| `sync territories` | Bootstrap territory hierarchy |
+| `sync matrices` | Sync matrix catalog |
+| `sync matrices --full` | Sync full matrix metadata (slow) |
+| `sync data` | Sync statistical data |
+| `sync data --matrix <code>` | Sync specific matrix |
+| `sync partitions` | Verify/create statistics partitions |
+| `sync status` | Show sync status for all matrices |
+| `sync tasks` | List queued sync tasks |
+| `sync worker` | Process queued sync tasks |
+| `sync retry --all` | Retry all failed tasks |
+| `sync retry --task <id>` | Retry specific failed task |
+| `sync history` | Show sync task history |
+| `sync plan --matrix <code>` | Preview sync execution plan |
+| `sync guide` | Show detailed sync workflow help |
+
+### Sync Data Options
+
+```bash
+pnpm cli sync data --matrix POP105A \
+  --years 2020-2024 \
+  --classifications totals \
+  --county AB \
+  --continue-on-error
+```
+
+| Option | Description |
+|--------|-------------|
+| `--matrix <code>` | Matrix code(s) to sync (repeatable) |
+| `--years <range>` | Year range, e.g., 2020-2024 |
+| `--classifications <mode>` | `totals` or `all` (default: totals) |
+| `--county <code>` | County code for county-specific sync |
+| `--limit <n>` | Limit number of matrices |
+| `--refresh` | Only sync matrices with existing data |
+| `--stale-only` | Only refresh matrices marked STALE |
+| `--continue-on-error` | Continue on individual matrix failures |
+| `--force` | Force re-sync ignoring checkpoints |
+| `--verbose` | Enable detailed logging |
+
+### Task Queue System
+
+Sync operations use a task queue to prevent duplicate requests and manage rate limiting:
+
+```bash
+# View pending tasks
+pnpm cli sync tasks
+
+# View task history
+pnpm cli sync history
+pnpm cli sync history POP105A  # History for specific matrix
+
+# Process tasks (run as background worker)
+pnpm cli sync worker
+pnpm cli sync worker --once  # Process one task and exit
+
+# Retry failed tasks
+pnpm cli sync retry --all
+pnpm cli sync retry --task 123
+```
+
+### Monitoring Sync Progress
+
+```bash
+# Check matrix sync status
+pnpm cli sync status
+pnpm cli sync status --failed  # Show only failed
+
+# Preview what would be synced
+pnpm cli sync plan --matrix POP105A --years 2020-2024
+```

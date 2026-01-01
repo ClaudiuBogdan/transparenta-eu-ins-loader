@@ -159,10 +159,10 @@ for i in "${!MATRICES[@]}"; do
 
   if pnpm cli sync data --matrix "$code" --years "$YEARS"; then
     echo "✓ $code completed"
-    ((SUCCESS++))
+    ((++SUCCESS))
   else
     echo "✗ $code failed"
-    ((FAILED++))
+    ((++FAILED))
     FAILED_LIST+=("$code")
   fi
 
